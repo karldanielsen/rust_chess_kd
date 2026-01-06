@@ -1,0 +1,408 @@
+use crate::game;
+
+
+pub struct Bot {
+	max_depth: u32,
+	mobility_weight: f32,
+	square_control_weights: [[f32; 8]; 8],
+	castle_bonus: f32,
+	can_castle_bonus: f32,
+	piece_weights: [f32; 6],
+	attack_weights: [f32; 6],
+	check_weight: f32,
+	minimax_prune_threshold: f32,
+}
+
+impl Bot {
+	pub fn new(max_depth: u32, mobility_weight: f32, square_control_weights: [[f32; 8]; 8], castle_bonus: f32, can_castle_bonus: f32, piece_weights: [f32; 6], attack_weights: [f32; 6], check_weight: f32, minimax_prune_threshold: f32) -> Bot {
+		Bot { max_depth, mobility_weight, square_control_weights, castle_bonus, can_castle_bonus, piece_weights, attack_weights, check_weight, minimax_prune_threshold }
+	}
+}
+// Hardcode a max depth for now, to avoid multithreading + waiting
+pub const DEFAULT_MAX_DEPTH: u32 = 3;
+
+pub const DEFAULT_MOBILITY_WEIGHT: f32 = 0.2;
+pub const DEFAULT_SQUARE_CONTROL_WEIGHTS: [[f32; 8]; 8] = [
+	[0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+	[0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+	[0.0, 0.0, 0.4, 0.4, 0.4, 0.4, 0.0, 0.0],
+	[0.0, 0.0, 0.4, 0.8, 0.8, 0.4, 0.0, 0.0],
+	[0.0, 0.0, 0.4, 0.8, 0.8, 0.4, 0.0, 0.0],
+	[0.0, 0.0, 0.4, 0.4, 0.4, 0.4, 0.0, 0.0],
+	[0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+	[0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+];
+
+// Bonus for castling specifically-- since king mobility is _good_ but castling is _better_
+// TODO: This doesn't work, we need to reward this in a nested manner. As it stands, it just
+// applies to the bottom-layer of the tree.
+pub const DEFAULT_CASTLE_BONUS: f32 = 10.0;
+
+// Bonus for maintaining the ability to castle
+pub const DEFAULT_CAN_CASTLE_BONUS: f32 = 1.0;
+
+// Piece weights array indexed by Role enum: [Queen, King, Rook, Bishop, Knight, Pawn]
+pub const DEFAULT_PIECE_WEIGHTS: [f32; 6] = [8.0, 15.0, 5.0, 3.1, 2.9, 1.0];
+
+// Attack weights array indexed by Role enum: [Queen, King, Rook, Bishop, Knight, Pawn]
+pub const DEFAULT_ATTACK_WEIGHTS: [f32; 6] = [4.0, 4.0, 2.5, 1.5, 1.5, 0.5];
+
+pub fn default_piece_weight(role: game::Role) -> f32 {
+	match role {
+		game::Role::Pawn => 1.0,
+		game::Role::Bishop => 3.1,
+		game::Role::Knight => 2.9,
+		game::Role::King => 15.0,
+		game::Role::Queen => 8.0,
+		game::Role::Rook => 5.0,
+		game::Role::Blank => 0.0,
+	}
+}
+
+pub fn default_attack_weight(role: game::Role) -> f32 {
+	match role {
+		game::Role::Pawn => 0.5,
+		game::Role::Bishop => 1.5,
+		game::Role::Knight => 1.5,
+		game::Role::King => 4.0,
+		game::Role::Queen => 4.0,
+		game::Role::Rook => 2.5,
+		game::Role::Blank => 0.0,
+	}
+}
+
+// Works okay
+// TODO:
+// - Implement defense score
+// - Implement repetition detection via Zobrist Hashing
+// - Add Transposition Table (Also Zobrist Hashing)
+// - At that point... It might be bitboard time
+// - Multithread and prune threads after a move is made
+// - Once speed to ~depth 6 is good, implement tournament tuning of weights
+impl Bot {
+pub fn minimax_eval(&self, game: &mut game::Game, depth: u32, mut floor: f32, mut ceil: f32) -> (game::Move, f32) {
+		let moves = game.move_list.as_ref().unwrap().clone();
+
+		let mut best_move = game::Move(game::Square(0,0), game::Square(0,0));
+		let mut best_score = if game.get_turn() == game::Color::White { f32::MIN } else { f32::MAX };
+		for mv in moves {
+			game.make_move(mv);
+			match game::get_other_color(game.turn) {
+				game::Color::White => if game.white_check {
+					game.reverse();
+					continue;
+				}
+				_ => if game.black_check {
+					game.reverse();
+					continue;
+				}
+			}
+			if game.checkmate {
+				game.reverse();
+				// Checkmate is always bad for the player whose turn it is
+				let checkmate_score = if game.get_turn() == game::Color::White { 100000.0 } else { -100000.0 };
+				return (mv, checkmate_score);
+			}
+
+			if self.check_for_repetition(game) {
+				game.reverse();
+				return (mv, 0.0);
+			}
+
+			let score = if depth < self.max_depth - 1 {
+				let (_, score) = self.minimax_eval(game, depth + 1, floor, ceil);
+				score
+			} else { // At max depth, evaluate the position.
+				self.eval(game, game.move_list.as_ref().unwrap())
+			};
+
+			game.reverse(); 
+
+			// Alpha-beta pruning logic
+			if game.get_turn() == game::Color::White {
+				// White is maximizing - update alpha (floor) and best move
+				if score > best_score {
+					best_score = score;
+					best_move = mv;
+				}
+				// Always update alpha (floor) - it's the best score we've found so far
+				floor = if score > floor { score } else { floor };
+				// Beta cutoff: if alpha >= beta, opponent won't allow this branch
+				if floor >= ceil {
+					break; // Prune remaining moves
+				}
+			} else {
+				// Black is minimizing - update beta (ceil) and best move
+				if score < best_score {
+					best_score = score;
+					best_move = mv;
+				}
+				// Always update beta (ceil) - it's the best score we've found so far
+				ceil = if score < ceil { score } else { ceil };
+				// Alpha cutoff: if beta <= alpha, opponent won't allow this branch
+				if ceil <= floor {
+					break; // Prune remaining moves
+				}
+			}
+		}
+
+		// If no move resulted in a score or checkmate, this is a draw.
+		if best_move == game::Move(game::Square(0,0), game::Square(0,0)) {
+			return (best_move, 0.0);
+		}
+		return (best_move, best_score);
+	}
+
+	pub fn check_for_repetition(&self, game: &game::Game) -> bool {
+		if game.since_last_non_reversible_move == 50 {
+			return true;
+		}
+
+		let original_board = &game.state.board;
+		let original_turn = game.state.turn;
+
+		let mut look_back_to = game.since_last_non_reversible_move as i16;
+		let mut current_game_state = &game.state; // &Rc<GameState>
+		while let Some(next_game_state) = &current_game_state.parent { // Option<Rc<GameState>>
+			if look_back_to < 0 {
+				return false;
+			}
+
+			if next_game_state.board == *original_board {
+				return true;
+			}
+
+			current_game_state = next_game_state;
+			look_back_to -= 2;
+		}
+		return false;
+	}
+
+	// To generate an evaluation score from White's perspective
+	// Positive = good for White, Negative = good for Black
+	fn eval(&self, game_state: &game::GameState, moves: &Vec<game::Move>) -> f32 {
+		// Mobility is not re-calculated for opposing player as an optimization
+		let prev_moves = game_state.parent.as_ref().unwrap().move_list.as_ref().unwrap();
+
+		// Calculate White's advantages (positive)
+		let white_material = self.material_score(game_state, game::Color::White);
+		let white_attack = self.attack_score(game_state, moves, game::Color::White);
+		let white_control = self.control_score(game_state, game::Color::White);
+		let white_check = self.check_score(game_state, game::Color::White);
+		let white_mobility = self.mobility_score(if game_state.turn == game::Color::White { moves } else { prev_moves });
+		let white_can_castle_bonus = self.can_castle_bonus(game_state, game::Color::White);
+
+		// Calculate Black's advantages (negative, since we're from White's perspective)
+		let black_material = self.material_score(game_state, game::Color::Black);
+		let black_attack = self.attack_score(game_state, moves, game::Color::Black);
+		let black_control = self.control_score(game_state, game::Color::Black);
+		let black_check = self.check_score(game_state, game::Color::Black);
+		let black_mobility = self.mobility_score(if game_state.turn == game::Color::Black { moves } else { prev_moves });
+		let black_can_castle_bonus = self.can_castle_bonus(game_state, game::Color::Black);
+		
+		(white_material + white_attack + white_control + white_can_castle_bonus + white_check + white_mobility) -
+		(black_material + black_attack + black_control + black_can_castle_bonus + black_check + black_mobility)
+	}
+
+	fn mobility_score(&self, moves: &Vec<game::Move>) -> f32 {
+		moves.len() as f32 * self.mobility_weight
+	}
+
+	fn material_score(&self, game_state: &game::GameState, color: game::Color) -> f32 {
+		let mut score = 0.0;
+		for x in 0..8 {
+			for y in 0..8 {
+				if game_state.board[x][y].color == color {
+					let role = game_state.board[x][y].role;
+					score += self.piece_weights[role as usize];
+				}
+			}
+		}
+		score
+	}
+
+	fn attack_score(&self, game_state: &game::GameState, moves: &Vec<game::Move>, color: game::Color) -> f32 {
+		let mut score = 0.0;
+		for mv in moves {
+			let target_role = game_state.board[mv.1.0][mv.1.1].role;
+			if game_state.board[mv.1.0][mv.1.1].color == game::get_other_color(color) {
+				score += self.attack_weights[target_role as usize];
+			}
+		}
+		score
+	}
+
+	// Center control is only valued on pawns-- for other pieces just mobility is enough
+	fn control_score(&self, game_state: &game::GameState, color: game::Color) -> f32 {
+		let mut score = 0.0;
+		for x in 2..6 {
+			for y in 2..6 {
+				if game_state.board[x][y].color == color && game_state.board[x][y].role == game::Role::Pawn {
+					score += self.square_control_weights[x][y];
+				}
+			}
+		}
+		score
+	}
+
+	fn check_score(&self, game_state: &game::GameState, turn: game::Color) -> f32 {
+		match turn {
+			game::Color::White => if game_state.white_check { self.check_weight } else { 0.0 },
+			game::Color::Black => if game_state.black_check { self.check_weight } else { 0.0 },
+			game::Color::Blank => 0.0,
+		}
+	}
+	fn can_castle_bonus(&self, game_state: &game::GameState, color: game::Color) -> f32 {
+		match color {
+			game::Color::White => (if game_state.white_castle_left { self.can_castle_bonus } else { 0.0 }) + (if game_state.white_castle_right { self.can_castle_bonus } else { 0.0 }),
+			game::Color::Black => (if game_state.black_castle_left { self.can_castle_bonus } else { 0.0 }) + (if game_state.black_castle_right { self.can_castle_bonus } else { 0.0 }),
+			game::Color::Blank => 0.0,
+		}
+	}
+	fn castle_bonus(&self, game_state: &game::GameState, mv: &game::Move) -> f32 {
+		match mv {
+			game::Move(game::Square(7, 4), game::Square(7, 0)) => if game_state.board[7][4].role == game::Role::King { self.castle_bonus } else { 0.0 },
+			game::Move(game::Square(7, 4), game::Square(7, 7)) => if game_state.board[7][4].role == game::Role::King { self.castle_bonus } else { 0.0 },
+			game::Move(game::Square(0, 4), game::Square(0, 0)) => if game_state.board[0][4].role == game::Role::King { self.castle_bonus } else { 0.0 },
+			game::Move(game::Square(0, 4), game::Square(0, 7)) => if game_state.board[0][4].role == game::Role::King { self.castle_bonus } else { 0.0 },
+			_ => 0.0,
+		}
+	}
+}
+
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn test_find_checkmate() {
+		let row_eight = [
+			game::Piece { role: game::Role::Rook, color: game::Color::Black },
+			game::Piece { role: game::Role::Blank, color: game::Color::Blank },
+			game::Piece { role: game::Role::Blank, color: game::Color::Blank },
+			game::Piece { role: game::Role::Blank, color: game::Color::Blank },
+			game::Piece { role: game::Role::Knight, color: game::Color::Black },
+			game::Piece { role: game::Role::Blank, color: game::Color::Blank },
+			game::Piece { role: game::Role::King, color: game::Color::Black },
+			game::Piece { role: game::Role::Blank, color: game::Color::Blank },
+		];
+		let row_seven = [
+			game::Piece { role: game::Role::Pawn, color: game::Color::Black },
+			game::Piece { role: game::Role::Blank, color: game::Color::Blank },
+			game::Piece { role: game::Role::Pawn, color: game::Color::Black },
+			game::Piece { role: game::Role::Queen, color: game::Color::Black },
+			game::Piece { role: game::Role::Blank, color: game::Color::Blank },
+			game::Piece { role: game::Role::Blank, color: game::Color::Blank },
+			game::Piece { role: game::Role::Blank, color: game::Color::Blank },
+			game::Piece { role: game::Role::Pawn, color: game::Color::Black },
+		];
+		let row_six = [
+			game::Piece { role: game::Role::Blank, color: game::Color::Blank },
+			game::Piece { role: game::Role::Pawn, color: game::Color::Black },
+			game::Piece { role: game::Role::Blank, color: game::Color::Blank },
+			game::Piece { role: game::Role::Pawn, color: game::Color::Black },
+			game::Piece { role: game::Role::Blank, color: game::Color::Blank },
+			game::Piece { role: game::Role::Blank, color: game::Color::Blank },
+			game::Piece { role: game::Role::Pawn, color: game::Color::Black },
+			game::Piece { role: game::Role::Bishop, color: game::Color::White },
+		];
+		let row_five = [
+			game::Piece { role: game::Role::Blank, color: game::Color::Blank },
+			game::Piece { role: game::Role::Blank, color: game::Color::Blank },
+			game::Piece { role: game::Role::Blank, color: game::Color::Blank },
+			game::Piece { role: game::Role::Blank, color: game::Color::Blank },
+			game::Piece { role: game::Role::Pawn, color: game::Color::White },
+			game::Piece { role: game::Role::Blank, color: game::Color::Blank },
+			game::Piece { role: game::Role::Blank, color: game::Color::Blank },
+			game::Piece { role: game::Role::Blank, color: game::Color::Blank },
+		];
+		let row_four = [
+			game::Piece { role: game::Role::Blank, color: game::Color::Blank },
+			game::Piece { role: game::Role::Knight, color: game::Color::White },
+			game::Piece { role: game::Role::Pawn, color: game::Color::White },
+			game::Piece { role: game::Role::Queen, color: game::Color::White },
+			game::Piece { role: game::Role::Bishop, color: game::Color::Black },
+			game::Piece { role: game::Role::Blank, color: game::Color::Blank },
+			game::Piece { role: game::Role::Blank, color: game::Color::Blank },
+			game::Piece { role: game::Role::Blank, color: game::Color::Blank },
+		];
+		let row_three = [
+			game::Piece { role: game::Role::Blank, color: game::Color::Blank },
+			game::Piece { role: game::Role::Blank, color: game::Color::Blank },
+			game::Piece { role: game::Role::Blank, color: game::Color::Blank },
+			game::Piece { role: game::Role::Blank, color: game::Color::Blank },
+			game::Piece { role: game::Role::Blank, color: game::Color::Blank },
+			game::Piece { role: game::Role::Blank, color: game::Color::Blank },
+			game::Piece { role: game::Role::Blank, color: game::Color::Blank },
+			game::Piece { role: game::Role::Pawn, color: game::Color::White },
+		];
+		let row_two = [
+			game::Piece { role: game::Role::Pawn, color: game::Color::White },
+			game::Piece { role: game::Role::Pawn, color: game::Color::White },
+			game::Piece { role: game::Role::Blank, color: game::Color::Blank },
+			game::Piece { role: game::Role::Blank, color: game::Color::Blank },
+			game::Piece { role: game::Role::Bishop, color: game::Color::White },
+			game::Piece { role: game::Role::Blank, color: game::Color::Blank },
+			game::Piece { role: game::Role::Pawn, color: game::Color::White },
+			game::Piece { role: game::Role::Blank, color: game::Color::Blank },
+		];
+		let row_one = [
+			game::Piece { role: game::Role::Blank, color: game::Color::Blank },
+			game::Piece { role: game::Role::Blank, color: game::Color::Blank },
+			game::Piece { role: game::Role::Rook, color: game::Color::White },
+			game::Piece { role: game::Role::Blank, color: game::Color::Blank },
+			game::Piece { role: game::Role::Blank, color: game::Color::Blank },
+			game::Piece { role: game::Role::Blank, color: game::Color::Blank },
+			game::Piece { role: game::Role::Blank, color: game::Color::Blank },
+			game::Piece { role: game::Role::King, color: game::Color::White },
+		];
+		let mut starting_game_state = game::GameState {
+			board: [
+				row_eight,
+				row_seven,
+				row_six,
+				row_five,
+				row_four,
+				row_three,
+				row_two,
+				row_one,
+			],
+			turn: game::Color::Black,
+			white_castle_left: false,
+			white_castle_right: false,
+			black_castle_left: false,
+			black_castle_right: false,
+			white_check: false,
+			black_check: false,
+			checkmate: false,
+			move_list: None, // Max possible moves in chess
+			parent: None,
+			since_last_non_reversible_move: 0,
+		};
+		starting_game_state.move_list = Some(game::get_all_valid_moves_fast(&starting_game_state, Some(game::Color::Black)));
+
+		let mut game = game::Game::from(starting_game_state);
+		let bot = Bot::new(3, 0.1, DEFAULT_SQUARE_CONTROL_WEIGHTS, 5.0, 2.0, DEFAULT_PIECE_WEIGHTS, DEFAULT_ATTACK_WEIGHTS, 0.5, 3.0);
+		let (mv, score) = bot.minimax_eval(&mut game, 0, f32::MIN, f32::MAX);
+		assert_eq!(mv, game::Move(game::Square(1, 3), game::Square(5, 7)));
+		assert_eq!(score, -100000.0);
+	}
+
+	#[test]
+	fn test_check_for_repetition() {
+		let mut game = game::Game::new();
+		let bot = Bot::new(3, 0.1, DEFAULT_SQUARE_CONTROL_WEIGHTS, 5.0, 2.0, DEFAULT_PIECE_WEIGHTS, DEFAULT_ATTACK_WEIGHTS, 0.5, 3.0);
+		game.make_move(game::Move(game::Square(7, 1), game::Square(3, 3)));
+		assert_eq!(bot.check_for_repetition(&game), false);
+
+		game.make_move(game::Move(game::Square(0, 1), game::Square(4, 4)));
+		assert_eq!(bot.check_for_repetition(&game), false);
+
+		game.make_move(game::Move(game::Square(3, 3), game::Square(7, 1)));
+		assert_eq!(bot.check_for_repetition(&game), false);
+
+		game.make_move(game::Move(game::Square(4, 4), game::Square(0, 1)));
+		assert_eq!(bot.check_for_repetition(&game), true);
+	}
+}
