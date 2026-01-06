@@ -158,9 +158,11 @@ pub fn minimax_eval(&self, game: &mut game::Game, depth: u32, mut floor: f32, mu
 			return true;
 		}
 
-		let original_board = &game.state.board;
+		let original_game_state = &game.state;
 		let original_turn = game.state.turn;
 
+		// In theory this can be optimized by only checking every other move,
+		// but it's not worth the complexity for now.
 		let mut look_back_to = game.since_last_non_reversible_move as i16;
 		let mut current_game_state = &game.state; // &Rc<GameState>
 		while let Some(next_game_state) = &current_game_state.parent { // Option<Rc<GameState>>
@@ -168,12 +170,12 @@ pub fn minimax_eval(&self, game: &mut game::Game, depth: u32, mut floor: f32, mu
 				return false;
 			}
 
-			if next_game_state.board == *original_board {
+			if *next_game_state == *original_game_state {
 				return true;
 			}
 
 			current_game_state = next_game_state;
-			look_back_to -= 2;
+			look_back_to -= 1;
 		}
 		return false;
 	}
@@ -358,6 +360,7 @@ mod tests {
 			game::Piece { role: game::Role::King, color: game::Color::White },
 		];
 		let mut starting_game_state = game::GameState {
+			bitboards: game::Bitboards::new(),
 			board: [
 				row_eight,
 				row_seven,

@@ -4,6 +4,46 @@ use std::rc::Rc;
 use std::hash::{Hash, Hasher};
 use colored::Colorize;
 
+const fn compute_knight_mask(idx: usize) -> u64 {
+    let row = idx / 8;
+    let col = idx % 8;
+    let mut mask = 0u64;
+    let moves = [
+        (1, 2), (2, 1), (-1, 2), (2, -1),
+        (1, -2), (-2, 1), (-1, -2), (-2, -1),
+    ];
+    let mut i = 0;
+    while i < 8 {
+        let (dx, dy) = moves[i];
+        let new_x = row as i8 + dx;
+        let new_y = col as i8 + dy;
+        if new_x >= 0 && new_x < 8 && new_y >= 0 && new_y < 8 {
+            mask |= 1u64 << (new_x as usize * 8 + new_y as usize);
+        }
+        i += 1;
+    }
+    mask
+}
+
+// Pre-computed knight masks for all squares
+const ALL_KNIGHT_MASKS: [u64; 64] = {
+    let mut masks = [0u64; 64];
+    let mut i = 0;
+    while i < 64 {
+        masks[i] = compute_knight_mask(i);
+        i += 1;
+    }
+    masks
+};
+
+const fn sq_to_idx(sq: Square) -> usize {
+	sq.0 * 8 + sq.1
+}
+
+const fn idx_to_sq(idx: usize) -> Square {
+	Square(idx / 8, idx % 8)
+}
+
 #[derive(Debug, PartialEq, Clone, Copy)]
 pub struct Square (pub usize, pub usize);
 
@@ -60,6 +100,23 @@ impl fmt::Display for Piece {
     }
 }
 
+#[derive(Clone)]
+pub struct Bitboards {
+	pub white_material: u64,
+	pub black_material: u64,
+}
+
+impl fmt::Display for Bitboards {
+	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+		write!(f, "White: {:b}, Black: {:b}", self.white_material, self.black_material)
+	}
+}
+
+impl Bitboards {
+	pub fn new() -> Bitboards {
+		Bitboards { white_material: 0, black_material: 0 }
+	}
+}
 // Immutable game state that can be shared via Rc
 #[derive(Clone)]
 pub struct GameState {
@@ -77,6 +134,7 @@ pub struct GameState {
 	pub black_check: bool,
 	pub checkmate: bool,
 	pub move_list: Option<Vec<Move>>,
+	pub bitboards: Bitboards,
 
 	// Used for branching and backtracking
 	pub parent: Option<Rc<GameState>>,
@@ -132,6 +190,16 @@ impl GameState {
 		}
 		new_board[from.0][from.1] = Piece { role: Role::Blank, color: Color::Blank };
 
+		let mut new_bitboards = self.bitboards.clone();
+		if self.turn == Color::White {
+			new_bitboards.white_material ^= (1u64 << sq_to_idx(from)) & (1u64 << sq_to_idx(to));
+			new_bitboards.black_material &= !(1u64 << sq_to_idx(to));
+		} else {
+			new_bitboards.black_material ^= (1u64 << sq_to_idx(from)) & (1u64 << sq_to_idx(to));
+			new_bitboards.white_material &= !(1u64 << sq_to_idx(to));
+		}
+
+
 		let white_castle_left = if self.white_castle_left {
 			!((from.0 == 7 && from.1 == 0) || (from.0 == 7 && from.1 == 4))
 		} else {
@@ -173,6 +241,7 @@ impl GameState {
 			checkmate: false,
 			parent: None,
 			since_last_non_reversible_move: 0,
+			bitboards: new_bitboards,
 		};
 
 		let black_moves = get_all_valid_moves_fast(&new_state, Some(Color::Black));
@@ -317,6 +386,10 @@ impl Game {
 				move_list: Some(vec![Move(Square(6, 3), Square(4, 3))]), // Max possible moves in chess
 				parent: None,
 				since_last_non_reversible_move: 0,
+				bitboards: Bitboards {
+					white_material: 0b11111111_11111111_00000000_00000000_00000000_00000000_00000000_00000000,
+					black_material: 0b00000000_00000000_00000000_00000000_00000000_00000000_11111111_11111111,
+				},
 			}),
 		}
 	}
@@ -425,17 +498,6 @@ fn get_moves_step_out(sq: &Square, game: &GameState, piece_color: Color, steps: 
 	valid_moves
 }
 
-const KNIGHT_MOVE_PAIRS: [(i8, i8); 8] = [
-	(1,2),
-	(2,1),
-	(-1,2),
-	(2,-1),
-	(1,-2),
-	(-2,1),
-	(-1,-2),
-	(-2,-1),
-];
-
 const ROOK_MOVE_PAIRS: [(i8, i8); 4] = [
 	(0,1),
 	(0,-1),
@@ -543,16 +605,20 @@ pub fn get_moves(sq: Square, game: &GameState) -> Vec<Move> {
 			valid_moves = get_moves_step_out(&sq, game, piece.color, &BISHOP_MOVE_PAIRS);
 		}
 		Role::Knight => {
-			for move_pair in &KNIGHT_MOVE_PAIRS {
-				let new_x = sq.0 as i8 + move_pair.0;
-				let new_y = sq.1 as i8 + move_pair.1;
-				if new_x >= 0 && new_x < 8 && new_y >= 0 && new_y < 8 {
-					let new_x = new_x as usize;
-					let new_y = new_y as usize;
-					if game.is_square_unoccupied(Square(new_x, new_y), piece.color) {
-						valid_moves.push(Move(Square(sq.0,sq.1), Square(new_x, new_y)));
-					}
+			let mut knight_mask = ALL_KNIGHT_MASKS[sq_to_idx(sq)];
+			knight_mask &= if piece.color == Color::White {
+				!game.bitboards.white_material
+			} else {
+				!game.bitboards.black_material
+			};
+
+			let mut idx = 0;
+			while knight_mask != 0 {
+				if knight_mask & 1 != 0 {
+					valid_moves.push(Move(sq, idx_to_sq(idx)));
 				}
+				knight_mask >>= 1;
+				idx += 1;
 			}
 		}
 		Role::Rook => {
@@ -722,16 +788,20 @@ pub fn get_all_valid_moves_fast(game: &GameState, color_override: Option<Color>)
 					add_moves_step_out(&mut moves, &sq, game, piece.color, &BISHOP_MOVE_PAIRS);
 				}
 				Role::Knight => {
-					for move_pair in &KNIGHT_MOVE_PAIRS {
-						let new_x = sq.0 as i8 + move_pair.0;
-						let new_y = sq.1 as i8 + move_pair.1;
-						if new_x >= 0 && new_x < 8 && new_y >= 0 && new_y < 8 {
-							let new_x = new_x as usize;
-							let new_y = new_y as usize;
-							if game.is_square_unoccupied(Square(new_x, new_y), piece.color) {
-								moves.push(Move(Square(sq.0,sq.1), Square(new_x, new_y)));
-							}
+					let mut knight_mask = ALL_KNIGHT_MASKS[sq_to_idx(sq)];
+					knight_mask &= if piece.color == Color::White {
+						!game.bitboards.white_material
+					} else {
+						!game.bitboards.black_material
+					};
+
+					let mut idx = 0;
+					while knight_mask != 0 {
+						if knight_mask & 1 != 0 {
+							moves.push(Move(sq, idx_to_sq(idx)));
 						}
+						knight_mask >>= 1;
+						idx += 1;
 					}
 				}
 				Role::Rook => add_moves_step_out(&mut moves, &sq, game, piece.color, &ROOK_MOVE_PAIRS),
@@ -847,12 +917,13 @@ mod tests {
     #[test]
 	fn test_knight_move() {
         let board = Game::new();
+		println!("Bitboards: {}", board.bitboards);
 		let knight_moves = get_moves(Square(0,1), &board);
 		assert_eq!(
 			knight_moves,
 			vec![
-				Move(Square(0, 1), Square(2, 2)),
 				Move(Square(0, 1), Square(2, 0)),
+				Move(Square(0, 1), Square(2, 2)),
 			],
 		);
     }
