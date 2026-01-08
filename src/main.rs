@@ -1,6 +1,7 @@
 mod game;
 mod bot;
 
+use std::time::Instant;
 use std::error::Error;
 use std::io;
 
@@ -91,17 +92,22 @@ fn main() -> () {
 	let bot1_piece_weights = [12.0, 20.0, 4.0, 2.1, 2.5, 1.3];
 
 	// max_depth, mobility_weight, square_control_weights, castle_bonus, can_castle_bonus, piece_weights, attack_weights, check_weight, pawn_advance_weights
-	let mut bot1 = bot::Bot::new(5, 0.25, bot::DEFAULT_SQUARE_CONTROL_WEIGHTS, 2.0, 1.0, bot1_piece_weights, bot1_attack_weights, 0.8, bot::DEFAULT_PAWN_ADVANCE_WEIGHTS);
-	let mut bot2 = bot::Bot::new(5, 0.05, bot::DEFAULT_SQUARE_CONTROL_WEIGHTS, 3.0, 1.0, bot::DEFAULT_PIECE_WEIGHTS, bot::DEFAULT_ATTACK_WEIGHTS, 0.5, bot::DEFAULT_PAWN_ADVANCE_WEIGHTS);
+	let mut bot1 = bot::Bot::new(6, 0.25, bot::DEFAULT_SQUARE_CONTROL_WEIGHTS, 2.0, 1.0, bot1_piece_weights, bot1_attack_weights, 0.8, bot::DEFAULT_PAWN_ADVANCE_WEIGHTS);
+	let mut bot2 = bot::Bot::new(6, 0.05, bot::DEFAULT_SQUARE_CONTROL_WEIGHTS, 3.0, 1.0, bot::DEFAULT_PIECE_WEIGHTS, bot::DEFAULT_ATTACK_WEIGHTS, 0.5, bot::DEFAULT_PAWN_ADVANCE_WEIGHTS);
 		
+	let mut move_calc_durations = Vec::new();
 	loop {
-		println!("{:?}\nBitboards:\n{}", game, game.bitboards);
+		println!("{:?}", game);
 		if game.checkmate {
 			println!("{} is in Checkmate. Game over.", game.get_turn());
-			break;
+			println!("Move calculation durations: {:?}", move_calc_durations);
+			println!("Average move calculation duration: {:?}", move_calc_durations.iter().sum::<std::time::Duration>() / move_calc_durations.len() as u32);
+						break;
 		}
 
+		let start = Instant::now();
 		let (bot_move, score) = bot1.evaluate_position(&mut game);
+		move_calc_durations.push(start.elapsed());
 		if bot_move.0 == bot_move.1 {
 			println!("Draw. Game over.");
 			break;
@@ -110,17 +116,22 @@ fn main() -> () {
 		println!("Bot 1 move: {:?}, score: {}", bot_move, score);
 		game.make_move(bot_move);
 
-		println!("{:?}\nBitboards:\n{}", game, game.bitboards);
+		println!("{:?}", game);
 		if game.checkmate {
 			println!("{} is in Checkmate. Game over.", game.get_turn());
-			break;
+			println!("Move calculation durations: {:?}", move_calc_durations);
+			println!("Average move calculation duration: {:?}", move_calc_durations.iter().sum::<std::time::Duration>() / move_calc_durations.len() as u32);
+						break;
 		}
 
-
+		let start = Instant::now();
 		let (bot_move, score) = bot2.evaluate_position(&mut game);
+		move_calc_durations.push(start.elapsed());
 		if bot_move.0 == bot_move.1 {
 			println!("Draw. Game over.");
-			break;
+			println!("Move calculation durations: {:?}", move_calc_durations);
+			println!("Average move calculation duration: {:?}", move_calc_durations.iter().sum::<std::time::Duration>() / move_calc_durations.len() as u32);
+						break;
 		}
 
 		println!("Bot 2 move: {:?}, score: {}", bot_move, score);
@@ -128,7 +139,9 @@ fn main() -> () {
 
 		if bot2.check_for_repetition(&game) {
 			println!("Draw by repetition. Game over.");
-			break;
+			println!("Move calculation durations: {:?}", move_calc_durations);
+			println!("Average move calculation duration: {:?}", move_calc_durations.iter().sum::<std::time::Duration>() / move_calc_durations.len() as u32);
+						break;
 		}
 	}
 }

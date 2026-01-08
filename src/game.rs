@@ -8,7 +8,7 @@ use once_cell::sync::Lazy;
 
 fn generate_zobrist_number() -> u64 {
 	let mut rng = rand::rng();
-	rng.random_range(0..16384)
+	rng.random_range(0..65536)
 }
 
 fn role_to_zobrist_index(role: Role, color: Color, square: Square) -> usize {

@@ -2,16 +2,18 @@ use crate::game;
 use std::rc::Rc;
 use std::cmp::Ordering;
 
-const TRANSPOSITION_TABLE_SIZE: usize = 16384;
+const TRANSPOSITION_TABLE_SIZE: usize = 65536;
 
 pub struct TranspositionTable {
-	table: [Option<(Rc<game::GameState>, f32, usize)>; TRANSPOSITION_TABLE_SIZE],
+	table: Vec<Option<(Rc<game::GameState>, f32, usize)>>,
 	clear_at: usize,
 }
 
 impl TranspositionTable {
 	pub fn new() -> TranspositionTable {
-		TranspositionTable { table: [const { None }; TRANSPOSITION_TABLE_SIZE], clear_at: 0 }
+		let mut table = Vec::with_capacity(TRANSPOSITION_TABLE_SIZE);
+        table.resize(TRANSPOSITION_TABLE_SIZE, None);
+        TranspositionTable { table, clear_at: 0 }
 	}
 
 	// Doesn't actually clear the table, just sets the clear_at to the current move count
@@ -25,26 +27,21 @@ impl TranspositionTable {
 			if game.move_count >= self.clear_at && entry.0 == game.state {
 				return Some(entry.1);
 			}
+			return None;
 		}
 		None
 	}
 
 	pub fn set(&mut self, game: &game::Game, score: f32) {
 		let hash = game.state.zobrist_hash.clone();
-		if let Some(entry) = &self.table[hash.hash as usize] {
-			if game.move_count >= self.clear_at || entry.0 == game.state {
-				self.table[hash.hash as usize] = Some((Rc::clone(&game.state), score, game.move_count));
-			} else {
-			}
-		} else {
-			self.table[hash.hash as usize] = Some((Rc::clone(&game.state), score, game.move_count));
-		}
+		self.table[hash.hash as usize] = Some((Rc::clone(&game.state), score, game.move_count));
 	}
 }
 
 pub struct Bot {
 	transposition_table: TranspositionTable,
-	transposition_table_depth_2: TranspositionTable,
+	eval_tables: [TranspositionTable; 2],
+	current_evals_table: usize,
 
 	max_depth: u32,
 	mobility_weight: f32,
@@ -59,7 +56,7 @@ pub struct Bot {
 
 impl Bot {
 	pub fn new(max_depth: u32, mobility_weight: f32, square_control_weights: [[f32; 8]; 8], castle_bonus: f32, can_castle_bonus: f32, piece_weights: [f32; 6], attack_weights: [f32; 6], check_weight: f32, pawn_advance_weights: [f32; 6]) -> Bot {
-		Bot { transposition_table: TranspositionTable::new(), transposition_table_depth_2: TranspositionTable::new(), max_depth, mobility_weight, square_control_weights, castle_bonus, can_castle_bonus, piece_weights, attack_weights, check_weight, pawn_advance_weights }
+		Bot { transposition_table: TranspositionTable::new(), eval_tables: [TranspositionTable::new(), TranspositionTable::new()], current_evals_table: 0, max_depth, mobility_weight, square_control_weights, castle_bonus, can_castle_bonus, piece_weights, attack_weights, check_weight, pawn_advance_weights }
 	}
 }
 // Hardcode a max depth for now, to avoid multithreading + waiting
@@ -130,7 +127,7 @@ pub fn default_attack_weight(role: game::Role) -> f32 {
 impl Bot {
 	pub fn evaluate_position(&mut self, game: &mut game::Game) -> (game::Move, f32) {
 		let (mv, score) = self.minimax_eval(game, 0, f32::MIN, f32::MAX);
-		self.transposition_table_depth_2.clear(game);
+		self.current_evals_table = (self.current_evals_table + 1) % 2;
 		if game.since_last_non_reversible_move == 0 || game.since_last_non_reversible_move == 1 {
 			self.transposition_table.clear(game);
 		}
@@ -144,34 +141,30 @@ impl Bot {
 			let is_white_turn = game.get_turn() == game::Color::White;
 			let mut moves_with_scores = moves.iter().map(|mv| {
 				game.make_move(*mv);
-				let score = self.transposition_table_depth_2.get(game);
+				let score = self.eval_tables[self.current_evals_table].get(game);
 				game.reverse();
 				(mv, score)
 			}).collect::<Vec<(&game::Move, Option<f32>)>>();
 
-			moves_with_scores.sort_by(|(_, a_score), (_, b_score)| {
+			moves_with_scores.sort_unstable_by(|(_, a_score), (_, b_score)| {
 				match (a_score, b_score) {
 					(Some(a), Some(b)) => {
-						// println!("Move had transposition entry at depth {}: a: {}, b: {}", depth, a, b);
 						if is_white_turn {
-							b_score.partial_cmp(a_score).unwrap_or(Ordering::Equal)
+							b.partial_cmp(a).unwrap_or(Ordering::Equal)
 						} else {
-							a_score.partial_cmp(b_score).unwrap_or(Ordering::Equal)
+							a.partial_cmp(b).unwrap_or(Ordering::Equal)
 						}
 					}
 
 					// If we checked it before that might actually mean 
 					// it is better, since it wasn't A/B pruned out
 					(Some(_), None) => {
-						// println!("Move had no transposition entry at depth");
 						Ordering::Less
 					}
 					(None, Some(_)) => {
-						// println!("Move had no transposition entry at depth");
 						Ordering::Greater
 					}
 					(None, None) => {
-						// println!("Move had no transposition entry at depth");
 						Ordering::Equal
 					}
 				}
@@ -182,7 +175,7 @@ impl Bot {
 
 		let mut best_move = game::Move(game::Square(0,0), game::Square(0,0));
 		let mut best_score = if game.get_turn() == game::Color::White { f32::MIN } else { f32::MAX };
-		for mv in moves {
+		for (i, mv) in moves.into_iter().enumerate() {
 			game.make_move(mv);
 			match game::get_other_color(game.turn) {
 				game::Color::White => if game.white_check {
@@ -204,23 +197,19 @@ impl Bot {
 			let score = if self.check_for_repetition(game) {
 				0.0
 			} else if depth == 0 {
-				if let Some(transposition_score) = self.transposition_table.get(game) {
-					transposition_score
-				} else {
+				// if let Some(transposition_score) = self.transposition_table.get(game) {
+				// 	transposition_score
+				// } else {
 					let (_, base_score) = self.minimax_eval(game, depth + 1, floor, ceil);
 					let score = base_score + self.do_castle_bonus(game, &mv);
 					self.transposition_table.set(game, score);
 					score
-				}
+				// }
 			} else if depth < self.max_depth - 1 {
 				if depth == 2 {
-					if let Some(transposition_score) = self.transposition_table_depth_2.get(game) {
-						transposition_score
-					} else {
-						let (_, score) = self.minimax_eval(game, depth + 1, floor, ceil);
-						self.transposition_table_depth_2.set(game, score);
-						score
-					}
+					let (_, score) = self.minimax_eval(game, depth + 1, floor, ceil);
+					self.eval_tables[(self.current_evals_table + 1) % 2].set(game, score);
+					score
 				} else {
 					let (_, score) = self.minimax_eval(game, depth + 1, floor, ceil);
 					score
@@ -241,7 +230,7 @@ impl Bot {
 				// Always update alpha (floor) - it's the best score we've found so far
 				floor = if score > floor { score } else { floor };
 				// Beta cutoff: if alpha >= beta, opponent won't allow this branch
-				if floor >= ceil {
+				if floor >= ceil && depth > 2 {
 					break; // Prune remaining moves
 				}
 			} else {
@@ -253,7 +242,7 @@ impl Bot {
 				// Always update beta (ceil) - it's the best score we've found so far
 				ceil = if score < ceil { score } else { ceil };
 				// Alpha cutoff: if beta <= alpha, opponent won't allow this branch
-				if ceil <= floor {
+				if ceil <= floor && depth > 2 {
 					break; // Prune remaining moves
 				}
 			}
