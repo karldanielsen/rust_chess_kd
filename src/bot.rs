@@ -1,7 +1,51 @@
 use crate::game;
+use std::rc::Rc;
+use std::cmp::Ordering;
 
+const TRANSPOSITION_TABLE_SIZE: usize = 16384;
+
+pub struct TranspositionTable {
+	table: [Option<(Rc<game::GameState>, f32, usize)>; TRANSPOSITION_TABLE_SIZE],
+	clear_at: usize,
+}
+
+impl TranspositionTable {
+	pub fn new() -> TranspositionTable {
+		TranspositionTable { table: [const { None }; TRANSPOSITION_TABLE_SIZE], clear_at: 0 }
+	}
+
+	// Doesn't actually clear the table, just sets the clear_at to the current move count
+	// This makes it so that entries before clear_at are ignored when setting new entries
+	pub fn clear(&mut self, game: &game::Game) -> () {
+		self.clear_at = game.move_count;
+	}
+
+	pub fn get(&self, game: &game::Game) -> Option<f32> {
+		if let Some(entry) = &self.table[game.state.zobrist_hash.hash as usize] {
+			if game.move_count >= self.clear_at && entry.0 == game.state {
+				return Some(entry.1);
+			}
+		}
+		None
+	}
+
+	pub fn set(&mut self, game: &game::Game, score: f32) {
+		let hash = game.state.zobrist_hash.clone();
+		if let Some(entry) = &self.table[hash.hash as usize] {
+			if game.move_count >= self.clear_at || entry.0 == game.state {
+				self.table[hash.hash as usize] = Some((Rc::clone(&game.state), score, game.move_count));
+			} else {
+			}
+		} else {
+			self.table[hash.hash as usize] = Some((Rc::clone(&game.state), score, game.move_count));
+		}
+	}
+}
 
 pub struct Bot {
+	transposition_table: TranspositionTable,
+	transposition_table_depth_2: TranspositionTable,
+
 	max_depth: u32,
 	mobility_weight: f32,
 	square_control_weights: [[f32; 8]; 8],
@@ -10,18 +54,18 @@ pub struct Bot {
 	piece_weights: [f32; 6],
 	attack_weights: [f32; 6],
 	check_weight: f32,
-	minimax_prune_threshold: f32,
+	pawn_advance_weights: [f32; 6],
 }
 
 impl Bot {
-	pub fn new(max_depth: u32, mobility_weight: f32, square_control_weights: [[f32; 8]; 8], castle_bonus: f32, can_castle_bonus: f32, piece_weights: [f32; 6], attack_weights: [f32; 6], check_weight: f32, minimax_prune_threshold: f32) -> Bot {
-		Bot { max_depth, mobility_weight, square_control_weights, castle_bonus, can_castle_bonus, piece_weights, attack_weights, check_weight, minimax_prune_threshold }
+	pub fn new(max_depth: u32, mobility_weight: f32, square_control_weights: [[f32; 8]; 8], castle_bonus: f32, can_castle_bonus: f32, piece_weights: [f32; 6], attack_weights: [f32; 6], check_weight: f32, pawn_advance_weights: [f32; 6]) -> Bot {
+		Bot { transposition_table: TranspositionTable::new(), transposition_table_depth_2: TranspositionTable::new(), max_depth, mobility_weight, square_control_weights, castle_bonus, can_castle_bonus, piece_weights, attack_weights, check_weight, pawn_advance_weights }
 	}
 }
 // Hardcode a max depth for now, to avoid multithreading + waiting
 pub const DEFAULT_MAX_DEPTH: u32 = 3;
 
-pub const DEFAULT_MOBILITY_WEIGHT: f32 = 0.2;
+pub const DEFAULT_MOBILITY_WEIGHT: f32 = 0.05;
 pub const DEFAULT_SQUARE_CONTROL_WEIGHTS: [[f32; 8]; 8] = [
 	[0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
 	[0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
@@ -46,6 +90,7 @@ pub const DEFAULT_PIECE_WEIGHTS: [f32; 6] = [8.0, 15.0, 5.0, 3.1, 2.9, 1.0];
 
 // Attack weights array indexed by Role enum: [Queen, King, Rook, Bishop, Knight, Pawn]
 pub const DEFAULT_ATTACK_WEIGHTS: [f32; 6] = [4.0, 4.0, 2.5, 1.5, 1.5, 0.5];
+pub const DEFAULT_PAWN_ADVANCE_WEIGHTS: [f32; 6] = [0.0, 0.0, 0.0, 0.1, 0.3, 0.5];
 
 pub fn default_piece_weight(role: game::Role) -> f32 {
 	match role {
@@ -62,26 +107,78 @@ pub fn default_piece_weight(role: game::Role) -> f32 {
 pub fn default_attack_weight(role: game::Role) -> f32 {
 	match role {
 		game::Role::Pawn => 0.5,
-		game::Role::Bishop => 1.5,
-		game::Role::Knight => 1.5,
-		game::Role::King => 4.0,
-		game::Role::Queen => 4.0,
-		game::Role::Rook => 2.5,
+		game::Role::Bishop => 1.0,
+		game::Role::Knight => 1.0,
+		game::Role::King => 2.5, // Check weight adds to this
+		game::Role::Queen => 2.0,
+		game::Role::Rook => 1.5,
 		game::Role::Blank => 0.0,
 	}
 }
 
-// Works okay
 // TODO:
-// - Implement defense score
-// - Implement repetition detection via Zobrist Hashing
-// - Add Transposition Table (Also Zobrist Hashing)
-// - At that point... It might be bitboard time
-// - Multithread and prune threads after a move is made
+// - Implement transposition table for depth 1 and use it for A/B move ordering.
+//   ie. Move with best depth 5 score should be checked first at depth 6.
+
+// Notes:
+// - For Transposition Table to do anything, we need to run and cache at greater depth.
+//   Even depth 2 should be much better, since it will account for move ordering.
+//   This also requires us to build a system to make in-progress evaluations portable.
+//   We'll have to pick up and resume evaluations from where we left off.
+// - Move ordering for A/B pruning is also sorely needed. Probably even more so than transposition table.
 // - Once speed to ~depth 6 is good, implement tournament tuning of weights
 impl Bot {
-pub fn minimax_eval(&self, game: &mut game::Game, depth: u32, mut floor: f32, mut ceil: f32) -> (game::Move, f32) {
-		let moves = game.move_list.as_ref().unwrap().clone();
+	pub fn evaluate_position(&mut self, game: &mut game::Game) -> (game::Move, f32) {
+		let (mv, score) = self.minimax_eval(game, 0, f32::MIN, f32::MAX);
+		self.transposition_table_depth_2.clear(game);
+		if game.since_last_non_reversible_move == 0 || game.since_last_non_reversible_move == 1 {
+			self.transposition_table.clear(game);
+		}
+		(mv, score)
+	}
+
+	pub fn minimax_eval(&mut self, game: &mut game::Game, depth: u32, mut floor: f32, mut ceil: f32) -> (game::Move, f32) {
+		let mut moves = game.move_list.as_ref().unwrap().clone();
+
+		if depth == 0 {
+			let is_white_turn = game.get_turn() == game::Color::White;
+			let mut moves_with_scores = moves.iter().map(|mv| {
+				game.make_move(*mv);
+				let score = self.transposition_table_depth_2.get(game);
+				game.reverse();
+				(mv, score)
+			}).collect::<Vec<(&game::Move, Option<f32>)>>();
+
+			moves_with_scores.sort_by(|(_, a_score), (_, b_score)| {
+				match (a_score, b_score) {
+					(Some(a), Some(b)) => {
+						// println!("Move had transposition entry at depth {}: a: {}, b: {}", depth, a, b);
+						if is_white_turn {
+							b_score.partial_cmp(a_score).unwrap_or(Ordering::Equal)
+						} else {
+							a_score.partial_cmp(b_score).unwrap_or(Ordering::Equal)
+						}
+					}
+
+					// If we checked it before that might actually mean 
+					// it is better, since it wasn't A/B pruned out
+					(Some(_), None) => {
+						// println!("Move had no transposition entry at depth");
+						Ordering::Less
+					}
+					(None, Some(_)) => {
+						// println!("Move had no transposition entry at depth");
+						Ordering::Greater
+					}
+					(None, None) => {
+						// println!("Move had no transposition entry at depth");
+						Ordering::Equal
+					}
+				}
+			});
+
+			moves = moves_with_scores.into_iter().map(|(mv, _)| *mv).collect::<Vec<game::Move>>();
+		}
 
 		let mut best_move = game::Move(game::Square(0,0), game::Square(0,0));
 		let mut best_score = if game.get_turn() == game::Color::White { f32::MIN } else { f32::MAX };
@@ -104,14 +201,30 @@ pub fn minimax_eval(&self, game: &mut game::Game, depth: u32, mut floor: f32, mu
 				return (mv, checkmate_score);
 			}
 
-			if self.check_for_repetition(game) {
-				game.reverse();
-				return (mv, 0.0);
-			}
-
-			let score = if depth < self.max_depth - 1 {
-				let (_, score) = self.minimax_eval(game, depth + 1, floor, ceil);
-				score
+			let score = if self.check_for_repetition(game) {
+				0.0
+			} else if depth == 0 {
+				if let Some(transposition_score) = self.transposition_table.get(game) {
+					transposition_score
+				} else {
+					let (_, base_score) = self.minimax_eval(game, depth + 1, floor, ceil);
+					let score = base_score + self.do_castle_bonus(game, &mv);
+					self.transposition_table.set(game, score);
+					score
+				}
+			} else if depth < self.max_depth - 1 {
+				if depth == 2 {
+					if let Some(transposition_score) = self.transposition_table_depth_2.get(game) {
+						transposition_score
+					} else {
+						let (_, score) = self.minimax_eval(game, depth + 1, floor, ceil);
+						self.transposition_table_depth_2.set(game, score);
+						score
+					}
+				} else {
+					let (_, score) = self.minimax_eval(game, depth + 1, floor, ceil);
+					score
+				}
 			} else { // At max depth, evaluate the position.
 				self.eval(game, game.move_list.as_ref().unwrap())
 			};
@@ -150,6 +263,7 @@ pub fn minimax_eval(&self, game: &mut game::Game, depth: u32, mut floor: f32, mu
 		if best_move == game::Move(game::Square(0,0), game::Square(0,0)) {
 			return (best_move, 0.0);
 		}
+
 		return (best_move, best_score);
 	}
 
@@ -193,6 +307,7 @@ pub fn minimax_eval(&self, game: &mut game::Game, depth: u32, mut floor: f32, mu
 		let white_check = self.check_score(game_state, game::Color::White);
 		let white_mobility = self.mobility_score(if game_state.turn == game::Color::White { moves } else { prev_moves });
 		let white_can_castle_bonus = self.can_castle_bonus(game_state, game::Color::White);
+		let white_pawn_advance = self.pawn_advance_score(game_state, game::Color::White);
 
 		// Calculate Black's advantages (negative, since we're from White's perspective)
 		let black_material = self.material_score(game_state, game::Color::Black);
@@ -201,9 +316,10 @@ pub fn minimax_eval(&self, game: &mut game::Game, depth: u32, mut floor: f32, mu
 		let black_check = self.check_score(game_state, game::Color::Black);
 		let black_mobility = self.mobility_score(if game_state.turn == game::Color::Black { moves } else { prev_moves });
 		let black_can_castle_bonus = self.can_castle_bonus(game_state, game::Color::Black);
-		
-		(white_material + white_attack + white_control + white_can_castle_bonus + white_check + white_mobility) -
-		(black_material + black_attack + black_control + black_can_castle_bonus + black_check + black_mobility)
+		let black_pawn_advance = self.pawn_advance_score(game_state, game::Color::Black);
+	
+		(white_material + white_attack + white_control + white_can_castle_bonus + white_check + white_mobility + white_pawn_advance) -
+		(black_material + black_attack + black_control + black_can_castle_bonus + black_check + black_mobility + black_pawn_advance)
 	}
 
 	fn mobility_score(&self, moves: &Vec<game::Move>) -> f32 {
@@ -261,14 +377,28 @@ pub fn minimax_eval(&self, game: &mut game::Game, depth: u32, mut floor: f32, mu
 			game::Color::Blank => 0.0,
 		}
 	}
-	fn castle_bonus(&self, game_state: &game::GameState, mv: &game::Move) -> f32 {
-		match mv {
-			game::Move(game::Square(7, 4), game::Square(7, 0)) => if game_state.board[7][4].role == game::Role::King { self.castle_bonus } else { 0.0 },
-			game::Move(game::Square(7, 4), game::Square(7, 7)) => if game_state.board[7][4].role == game::Role::King { self.castle_bonus } else { 0.0 },
-			game::Move(game::Square(0, 4), game::Square(0, 0)) => if game_state.board[0][4].role == game::Role::King { self.castle_bonus } else { 0.0 },
-			game::Move(game::Square(0, 4), game::Square(0, 7)) => if game_state.board[0][4].role == game::Role::King { self.castle_bonus } else { 0.0 },
+	fn do_castle_bonus(&self, game_state: &game::GameState, mv: &game::Move) -> f32 {
+		let bonus = match mv {
+			game::Move(game::Square(7, 4), game::Square(7, 2)) => if game_state.board[7][2].role == game::Role::King { self.castle_bonus } else { 0.0 },
+			game::Move(game::Square(7, 4), game::Square(7, 6)) => if game_state.board[7][6].role == game::Role::King { self.castle_bonus } else { 0.0 },
+			game::Move(game::Square(0, 4), game::Square(0, 2)) => if game_state.board[0][2].role == game::Role::King { self.castle_bonus } else { 0.0 },
+			game::Move(game::Square(0, 4), game::Square(0, 6)) => if game_state.board[0][6].role == game::Role::King { self.castle_bonus } else { 0.0 },
 			_ => 0.0,
+		};
+		return bonus;
+	}
+
+	fn pawn_advance_score(&self, game_state: &game::GameState, color: game::Color) -> f32 {
+		let mut score = 0.0;
+		for x in 1..7 {
+			for y in 0..8 {
+				if game_state.board[x][y].color == color && game_state.board[x][y].role == game::Role::Pawn {
+					let score_idx = if color == game::Color::White { 5 - (x - 1) as usize } else { (x - 1) as usize };
+					score += self.pawn_advance_weights[score_idx];
+				}
+			}
 		}
+		score
 	}
 }
 
@@ -386,7 +516,7 @@ mod tests {
 		starting_game_state.move_list = Some(game::get_all_valid_moves_fast(&starting_game_state, Some(game::Color::Black)));
 
 		let mut game = game::Game::from(starting_game_state);
-		let bot = Bot::new(3, 0.1, DEFAULT_SQUARE_CONTROL_WEIGHTS, 5.0, 2.0, DEFAULT_PIECE_WEIGHTS, DEFAULT_ATTACK_WEIGHTS, 0.5, 3.0);
+		let bot = Bot::new(3, 0.1, DEFAULT_SQUARE_CONTROL_WEIGHTS, 5.0, 2.0, DEFAULT_PIECE_WEIGHTS, DEFAULT_ATTACK_WEIGHTS, 0.5, DEFAULT_PAWN_ADVANCE_WEIGHTS);
 		let (mv, score) = bot.minimax_eval(&mut game, 0, f32::MIN, f32::MAX);
 		assert_eq!(mv, game::Move(game::Square(1, 3), game::Square(5, 7)));
 		assert_eq!(score, -100000.0);
@@ -395,7 +525,7 @@ mod tests {
 	#[test]
 	fn test_check_for_repetition() {
 		let mut game = game::Game::new();
-		let bot = Bot::new(3, 0.1, DEFAULT_SQUARE_CONTROL_WEIGHTS, 5.0, 2.0, DEFAULT_PIECE_WEIGHTS, DEFAULT_ATTACK_WEIGHTS, 0.5, 3.0);
+		let bot = Bot::new(3, 0.1, DEFAULT_SQUARE_CONTROL_WEIGHTS, 5.0, 2.0, DEFAULT_PIECE_WEIGHTS, DEFAULT_ATTACK_WEIGHTS, 0.5, DEFAULT_PAWN_ADVANCE_WEIGHTS);
 		game.make_move(game::Move(game::Square(7, 1), game::Square(3, 3)));
 		assert_eq!(bot.check_for_repetition(&game), false);
 

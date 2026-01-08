@@ -2,7 +2,116 @@ use std::fmt;
 use std::ops::Deref;
 use std::rc::Rc;
 use std::hash::{Hash, Hasher};
+use rand::Rng;
 use colored::Colorize;
+use once_cell::sync::Lazy;
+
+fn generate_zobrist_number() -> u64 {
+	let mut rng = rand::rng();
+	rng.random_range(0..16384)
+}
+
+fn role_to_zobrist_index(role: Role, color: Color, square: Square) -> usize {
+	let role_offset = match role {
+		Role::Queen => 0,
+		Role::King => 1,
+		Role::Rook => 2,
+		Role::Bishop => 3,
+		Role::Knight => 4,
+		Role::Pawn => 5,
+		Role::Blank => panic!("Tried to get Zobrist index for blank square, role: {:?}, color: {:?}, square: {:?}", role, color, square),
+	};
+	let color_offset = match color {
+		Color::White => 0,
+		Color::Black => 1,
+		Color::Blank => panic!("Tried to get Zobrist index for blank square, role: {:?}, color: {:?}, square: {:?}", role, color, square),
+	};
+	(color_offset * 64 * 6) + (role_offset * 64) + (square.0 * 8 + square.1)
+}
+
+static ZOBRIST_NUMBERS: Lazy<[u64; 773]> = Lazy::new(|| {
+	let mut numbers = [0u64; 773];
+	for i in 0..773 {
+		numbers[i] = generate_zobrist_number();
+	}
+	numbers
+});
+
+#[derive(Clone)]
+pub struct ZobristHash {
+	pub hash: u64,
+}
+
+impl ZobristHash {
+	pub fn new() -> ZobristHash {
+		ZobristHash { hash: 0 }
+	}
+
+	pub fn from(game_state: &GameState) -> ZobristHash {
+		let mut hash = 0;
+		for x in 0..8 {
+			for y in 0..8 {
+				let piece = game_state.board[x][y];
+				if piece.color != Color::Blank {
+					let idx = role_to_zobrist_index(piece.role, piece.color, Square(x, y));
+					hash ^= ZOBRIST_NUMBERS[idx];
+				}
+			}
+		}
+		if game_state.turn == Color::Black {
+			hash ^= ZOBRIST_NUMBERS[64 * 5];
+		}
+
+		if game_state.white_castle_left {
+			hash ^= ZOBRIST_NUMBERS[64 * 12 + 1];
+		}
+		if game_state.white_castle_right {
+			hash ^= ZOBRIST_NUMBERS[64 * 12 + 2];
+		}
+		if game_state.black_castle_left {
+			hash ^= ZOBRIST_NUMBERS[64 * 12 + 3];
+		}
+		if game_state.black_castle_right {
+			hash ^= ZOBRIST_NUMBERS[64 * 12 + 4];
+		}
+		ZobristHash { hash }
+	}
+
+	pub fn update_move(&mut self, game_state: &GameState, mv: &Move) {
+		let from = mv.0;
+		let to = mv.1;
+		let piece = game_state.board[from.0][from.1];
+		let target_piece = game_state.board[to.0][to.1];
+		let from_idx = role_to_zobrist_index(piece.role, piece.color, from);
+		let to_idx = role_to_zobrist_index(piece.role, piece.color, to);
+
+		self.hash ^= ZOBRIST_NUMBERS[from_idx];
+		self.hash ^= ZOBRIST_NUMBERS[to_idx];
+		if target_piece.color != Color::Blank {
+			let attacked_piece_idx = role_to_zobrist_index(target_piece.role, target_piece.color, to);
+			self.hash ^= ZOBRIST_NUMBERS[attacked_piece_idx];
+		}
+	}
+
+	pub fn update_turn(&mut self) {
+		self.hash ^= ZOBRIST_NUMBERS[64 * 5];
+	}
+
+	pub fn update_castle_rights(&mut self, white_left: bool, white_right: bool, black_left: bool, black_right: bool) {
+		if white_left {
+			self.hash ^= ZOBRIST_NUMBERS[64 * 5 + 1];
+		}
+		if white_right {
+			self.hash ^= ZOBRIST_NUMBERS[64 * 5 + 2];
+		}
+		if black_left {
+			self.hash ^= ZOBRIST_NUMBERS[64 * 5 + 3];
+		}
+		if black_right {
+			self.hash ^= ZOBRIST_NUMBERS[64 * 5 + 4];
+		}
+	}
+}
 
 const fn compute_knight_mask(idx: usize) -> u64 {
     let row = idx / 8;
@@ -36,6 +145,35 @@ const ALL_KNIGHT_MASKS: [u64; 64] = {
     masks
 };
 
+const KING_MOVE_PAIRS: [(i8, i8); 8] = [(0,1), (0,-1), (1,1), (1,0), (1,-1), (-1,1), (-1,0), (-1,-1)];
+
+const fn compute_king_mask(idx: usize) -> u64 {
+	let row = idx / 8;
+	let col = idx % 8;
+	let mut mask = 0u64;
+
+	let mut i = 0;
+    while i < 8 {
+        let (dx, dy) = KING_MOVE_PAIRS[i];
+        let new_x = row as i8 + dx;
+        let new_y = col as i8 + dy;
+        if new_x >= 0 && new_x < 8 && new_y >= 0 && new_y < 8 {
+            mask |= 1u64 << (new_x as usize * 8 + new_y as usize);
+        }
+        i += 1;
+    }
+    mask
+}
+const ALL_KING_MASKS: [u64; 64] = {
+	let mut masks = [0u64; 64];
+	let mut i = 0;
+	while i < 64 {
+		masks[i] = compute_king_mask(i);
+		i += 1;
+	}
+	masks
+};
+
 const fn sq_to_idx(sq: Square) -> usize {
 	sq.0 * 8 + sq.1
 }
@@ -49,6 +187,15 @@ pub struct Square (pub usize, pub usize);
 
 #[derive(Debug, PartialEq, Clone, Copy)]
 pub struct Move (pub Square, pub Square);
+
+impl Move {
+	pub fn is_castle(mv: &Move) -> bool {
+		mv.0 == Square(7, 4) && mv.1 == Square(7, 2) ||
+		mv.0 == Square(7, 4) && mv.1 == Square(7, 6) ||
+		mv.0 == Square(0, 4) && mv.1 == Square(0, 2) ||
+		mv.0 == Square(0, 4) && mv.1 == Square(0, 6)
+	}
+}
 
 #[derive(Debug, PartialEq, Clone, Copy, Hash, Eq)]
 pub enum Color { White, Black, Blank }
@@ -104,17 +251,21 @@ impl fmt::Display for Piece {
 pub struct Bitboards {
 	pub white_material: u64,
 	pub black_material: u64,
+	// pub white_pawns: u64,
+	// pub black_pawns: u64,
+	pub white_mobility: u64,
+	pub black_mobility: u64,
 }
 
 impl fmt::Display for Bitboards {
 	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-		write!(f, "White: {:b}, Black: {:b}", self.white_material, self.black_material)
+		write!(f, "White Material: {:b},\nBlack Material: {:b},\nWhite Mobility: {:b},\nBlack Mobility: {:b}", self.white_material, self.black_material, self.white_mobility, self.black_mobility)
 	}
 }
 
 impl Bitboards {
 	pub fn new() -> Bitboards {
-		Bitboards { white_material: 0, black_material: 0 }
+		Bitboards { white_material: 0, black_material: 0, white_mobility: 0, black_mobility: 0 }
 	}
 }
 // Immutable game state that can be shared via Rc
@@ -135,8 +286,10 @@ pub struct GameState {
 	pub checkmate: bool,
 	pub move_list: Option<Vec<Move>>,
 	pub bitboards: Bitboards,
+	pub zobrist_hash: ZobristHash,
 
 	// Used for branching and backtracking
+	pub move_count: usize,
 	pub parent: Option<Rc<GameState>>,
 	pub since_last_non_reversible_move: usize,
 }
@@ -153,17 +306,6 @@ impl PartialEq for GameState {
 }
 
 impl Eq for GameState {}
-
-impl Hash for GameState {
-	fn hash<H: Hasher>(&self, state: &mut H) {
-		self.board.hash(state);
-		self.turn.hash(state);
-		self.white_castle_left.hash(state);
-		self.white_castle_right.hash(state);
-		self.black_castle_left.hash(state);
-		self.black_castle_right.hash(state);
-	}
-}
 
 impl GameState {
     fn is_square_unoccupied(&self, square: Square, color: Color) -> bool {
@@ -184,6 +326,8 @@ impl GameState {
 		let from = mv.0;
 		let to = mv.1;
 		let mut new_board = self.board;
+
+		// Move the piece to the new square
 		new_board[to.0][to.1] = self.board[from.0][from.1];
 		if (to.0 == 7 || to.0 == 0) && new_board[to.0][to.1].role == Role::Pawn {
 			new_board[to.0][to.1].role = Role::Queen;
@@ -192,13 +336,33 @@ impl GameState {
 
 		let mut new_bitboards = self.bitboards.clone();
 		if self.turn == Color::White {
-			new_bitboards.white_material ^= (1u64 << sq_to_idx(from)) & (1u64 << sq_to_idx(to));
+			new_bitboards.white_material ^= (1u64 << sq_to_idx(from)) | (1u64 << sq_to_idx(to));
 			new_bitboards.black_material &= !(1u64 << sq_to_idx(to));
 		} else {
-			new_bitboards.black_material ^= (1u64 << sq_to_idx(from)) & (1u64 << sq_to_idx(to));
+			new_bitboards.black_material ^= (1u64 << sq_to_idx(from)) | (1u64 << sq_to_idx(to));
 			new_bitboards.white_material &= !(1u64 << sq_to_idx(to));
 		}
 
+		// If the move was a castle, also move the rook to the new square
+		if Move::is_castle(mv) {
+			if mv.1 == Square(7, 2) {
+				new_board[7][3] = new_board[7][0];
+				new_board[7][0] = Piece { role: Role::Blank, color: Color::Blank };
+				new_bitboards.black_material ^= (1u64 << (7 * 8 + 3)) & (1u64 << (7 * 8));
+			} else if mv.1 == Square(7, 6) {
+				new_board[7][5] = new_board[7][7];
+				new_board[7][7] = Piece { role: Role::Blank, color: Color::Blank };
+				new_bitboards.black_material ^= (1u64 << (7 * 8 + 5)) & (1u64 << (7 * 8 + 7));
+			} else if mv.1 == Square(0, 2) {
+				new_board[0][3] = new_board[0][0];
+				new_board[0][0] = Piece { role: Role::Blank, color: Color::Blank };
+				new_bitboards.white_material ^= (1u64 << (0 * 8 + 3)) & (1u64 << (0 * 8));
+			} else if mv.1 == Square(0, 6) {
+				new_board[0][5] = new_board[0][7];
+				new_board[0][7] = Piece { role: Role::Blank, color: Color::Blank };
+				new_bitboards.white_material ^= (1u64 << 5) & (1u64 << 7);
+			}
+		}
 
 		let white_castle_left = if self.white_castle_left {
 			!((from.0 == 7 && from.1 == 0) || (from.0 == 7 && from.1 == 4))
@@ -242,6 +406,8 @@ impl GameState {
 			parent: None,
 			since_last_non_reversible_move: 0,
 			bitboards: new_bitboards,
+			zobrist_hash: ZobristHash::new(),
+			move_count: self.move_count + 1,
 		};
 
 		let black_moves = get_all_valid_moves_fast(&new_state, Some(Color::Black));
@@ -265,9 +431,32 @@ impl GameState {
 			}
 		});
 
+
+		// TODO: Can roll this into the check checks to avoid 2 passes
+		new_state.bitboards.white_mobility = 0;
+		for mv in &white_moves {
+			new_state.bitboards.white_mobility |= 1u64 << sq_to_idx(mv.1);
+		}
+
+		new_state.bitboards.black_mobility = 0;
+		for mv in &black_moves {
+			new_state.bitboards.black_mobility |= 1u64 << sq_to_idx(mv.1);
+		}
+
 		new_state.white_check = white_check;
 		new_state.black_check = black_check;
 		new_state.move_list = Some(if new_state.turn == Color::White { white_moves } else { black_moves });
+
+		let mut new_zobrist_hash = self.zobrist_hash.clone();
+		new_zobrist_hash.update_move(self, &mv);
+		new_zobrist_hash.update_turn();
+		new_zobrist_hash.update_castle_rights( // Update only if these have changed
+			white_castle_left == self.white_castle_left,
+			white_castle_right == self.white_castle_right,
+			black_castle_left == self.black_castle_left,
+			black_castle_right == self.black_castle_right,
+		);
+		new_state.zobrist_hash = new_zobrist_hash;
 
 		new_state.since_last_non_reversible_move = if
 		    // If the move is a pawn promotion or a capture, reset the counter
@@ -363,8 +552,8 @@ impl Game {
 			Piece { role: Role::Knight, color: Color::White },
 			Piece { role: Role::Rook, color: Color::White },
 		];
-		Game {
-			state: Rc::new(GameState {
+
+		let mut game_state = GameState {
 				board: [
 					row_eight,
 					row_seven,
@@ -389,9 +578,14 @@ impl Game {
 				bitboards: Bitboards {
 					white_material: 0b11111111_11111111_00000000_00000000_00000000_00000000_00000000_00000000,
 					black_material: 0b00000000_00000000_00000000_00000000_00000000_00000000_11111111_11111111,
+					white_mobility: 0b00000000_00000000_11111111_11111111_00000000_00000000_00000000_00000000,
+					black_mobility: 0b00000000_00000000_00000000_00000000_11111111_11111111_00000000_00000000,
 				},
-			}),
-		}
+				zobrist_hash: ZobristHash::new(),
+				move_count: 0,
+		};
+		game_state.zobrist_hash = ZobristHash::from(&game_state);
+		Game { state: Rc::new(game_state) }
 	}
 
 	// Reverses most recently made move
@@ -523,17 +717,6 @@ const QUEEN_MOVE_PAIRS: [(i8, i8); 8] = [
 	(-1,0),
 ];
 
-const KING_MOVE_PAIRS: [(i8, i8); 8] = [
-	(0,1),
-	(0,-1),
-	(1,0),
-	(1,1),
-	(1,-1),
-	(-1,0),
-	(-1,1),
-	(-1,-1),
-];
-
 #[inline(never)]
 pub fn get_moves(sq: Square, game: &GameState) -> Vec<Move> {
 	let piece = game.board[sq.0][sq.1];
@@ -543,26 +726,19 @@ pub fn get_moves(sq: Square, game: &GameState) -> Vec<Move> {
 			valid_moves = get_moves_step_out(&sq, game, piece.color, &QUEEN_MOVE_PAIRS);
 		}
 		Role::King => {
-			let pairs = [
-				[0,1],
-				[0,-1],
-				[1,0],
-				[1,1],
-				[1,-1],
-				[-1,0],
-				[-1,1],
-				[-1,-1]
-			];
-			for move_pair in pairs {
-				let new_x = sq.0 as i8 + move_pair[0];
-				let new_y = sq.1 as i8 + move_pair[1];
-				if new_x >= 0 && new_x < 8 && new_y >= 0 && new_y < 8 {
-					let new_x = new_x as usize;
-					let new_y = new_y as usize;
-					if !game.is_square_color(Square(new_x, new_y), piece.color) {
-						valid_moves.push(Move(Square(sq.0,sq.1), Square(new_x, new_y)));
-					}
-				}
+			let mut king_mask = ALL_KING_MASKS[sq_to_idx(sq)];
+			println!("King mask: {:b}", king_mask);
+			king_mask &= if piece.color == Color::White {
+				!game.bitboards.white_material
+			} else {
+				!game.bitboards.black_material
+			};
+
+			while king_mask != 0 {
+				println!("King mask: {:b}", king_mask);
+				let idx = king_mask.trailing_zeros() as usize;
+				valid_moves.push(Move(sq, idx_to_sq(idx)));
+				king_mask ^= 1u64 << idx;
 			}
 
 			match piece.color {
@@ -571,14 +747,14 @@ pub fn get_moves(sq: Square, game: &GameState) -> Vec<Move> {
 						if [(7,1), (7,2), (7,3)]
 							.into_iter()
 							.all(|(x, y)| game.board[x][y].color == Color::Blank) {
-								valid_moves.push(Move(Square(7, 4), Square(7, 0)));
+								valid_moves.push(Move(Square(7, 4), Square(7, 2)));
 							}
 					}
 					if game.white_castle_right {
 						if [(7,6), (7,5)]
 							.into_iter()
 							.all(|(x, y)| game.board[x][y].color == Color::Blank) {
-								valid_moves.push(Move(Square(7, 4), Square(7, 7)));
+								valid_moves.push(Move(Square(7, 4), Square(7, 6)));
 							}
 					}
 				}
@@ -587,14 +763,14 @@ pub fn get_moves(sq: Square, game: &GameState) -> Vec<Move> {
 						if [(0,1), (0,2), (0,3)]
 							.into_iter()
 							.all(|(x, y)| game.board[x][y].color == Color::Blank) {
-								valid_moves.push(Move(Square(0, 4), Square(0, 0)));
+								valid_moves.push(Move(Square(0, 4), Square(0, 2)));
 							}
 					}
 					if game.black_castle_right {
 						if [(0,6), (0,5)]
 							.into_iter()
 							.all(|(x, y)| game.board[x][y].color == Color::Blank) {
-								valid_moves.push(Move(Square(0, 4), Square(0, 7)));
+								valid_moves.push(Move(Square(0, 4), Square(0, 6)));
 							}
 					}
 				}
@@ -736,16 +912,17 @@ pub fn get_all_valid_moves_fast(game: &GameState, color_override: Option<Color>)
 					add_moves_step_out(&mut moves, &sq, game, piece.color, &QUEEN_MOVE_PAIRS);
 				}
 				Role::King => {
-					for move_pair in &KING_MOVE_PAIRS {
-						let new_x = sq.0 as i8 + move_pair.0;
-						let new_y = sq.1 as i8 + move_pair.1;
-						if new_x >= 0 && new_x < 8 && new_y >= 0 && new_y < 8 {
-							let new_x = new_x as usize;
-							let new_y = new_y as usize;
-							if !game.is_square_color(Square(new_x, new_y), piece.color) {
-								moves.push(Move(Square(sq.0,sq.1), Square(new_x, new_y)));
-							}
-						}
+					let mut king_mask = ALL_KING_MASKS[sq_to_idx(sq)];
+					king_mask &= if piece.color == Color::White {
+						!game.bitboards.white_material
+					} else {
+						!game.bitboards.black_material
+					};
+
+					while king_mask != 0 {
+						let idx = king_mask.trailing_zeros() as usize;
+						moves.push(Move(sq, idx_to_sq(idx)));
+						king_mask &= king_mask - 1;
 					}
 		
 					match piece.color {
@@ -754,14 +931,14 @@ pub fn get_all_valid_moves_fast(game: &GameState, color_override: Option<Color>)
 								if [(7,1), (7,2), (7,3)]
 									.into_iter()
 									.all(|(x, y)| game.board[x][y].color == Color::Blank) {
-										moves.push(Move(Square(7, 4), Square(7, 0)));
+										moves.push(Move(Square(7, 4), Square(7, 2)));
 									}
 							}
 							if game.white_castle_right {
 								if [(7,6), (7,5)]
 									.into_iter()
 									.all(|(x, y)| game.board[x][y].color == Color::Blank) {
-										moves.push(Move(Square(7, 4), Square(7, 7)));
+										moves.push(Move(Square(7, 4), Square(7, 6)));
 									}
 							}
 						}
@@ -770,14 +947,14 @@ pub fn get_all_valid_moves_fast(game: &GameState, color_override: Option<Color>)
 								if [(0,1), (0,2), (0,3)]
 									.into_iter()
 									.all(|(x, y)| game.board[x][y].color == Color::Blank) {
-										moves.push(Move(Square(0, 4), Square(0, 0)));
+										moves.push(Move(Square(0, 4), Square(0, 2)));
 									}
 							}
 							if game.black_castle_right {
 								if [(0,6), (0,5)]
 									.into_iter()
 									.all(|(x, y)| game.board[x][y].color == Color::Blank) {
-										moves.push(Move(Square(0, 4), Square(0, 7)));
+										moves.push(Move(Square(0, 4), Square(0, 6)));
 									}
 							}
 						}
@@ -1005,34 +1182,88 @@ mod tests {
 		assert_eq!(moves, vec![]);
 
 		// Move everything out of the way to test castling
+		// For bitboard updates to work, we need to execute moves
+		// on the correct color's turn.
+		board.make_move(Move(Square(7, 7), Square(7,7))); // W
 		board.make_move(Move(Square(0, 1), Square(7,7))); // B
-		board.make_move(Move(Square(0, 2), Square(7,7))); // W
-		board.make_move(Move(Square(0, 3), Square(7,7))); // B
-		board.make_move(Move(Square(0, 5), Square(7,7))); // W
-		board.make_move(Move(Square(0, 6), Square(7,7))); // B
+		board.make_move(Move(Square(7, 7), Square(7,7))); // W
+		board.make_move(Move(Square(0, 2), Square(7,6))); // B
+		board.make_move(Move(Square(7, 7), Square(7,7))); // W
+		board.make_move(Move(Square(0, 3), Square(7,5))); // B
+		board.make_move(Move(Square(7, 7), Square(7,7))); // W
+		board.make_move(Move(Square(0, 5), Square(7,4))); // B
+		board.make_move(Move(Square(7, 7), Square(7,7))); // W
+		board.make_move(Move(Square(0, 6), Square(7,3))); // B
 		let moves = get_moves(Square(0, 4), &board);
 		assert_eq!(
 			moves,
 			vec![
-				Move(Square(0, 4),Square(0, 5)),
 				Move(Square(0, 4), Square(0, 3)),
-				Move(Square(0, 4), Square(0, 0)),
-				Move(Square(0, 4), Square(0, 7)),
+				Move(Square(0, 4),Square(0, 5)),
+				Move(Square(0, 4), Square(0, 2)),
+				Move(Square(0, 4), Square(0, 6)),
 			],
 		);
 
-		// Shuffle back and forth
-		board.make_move(Move(Square(0, 4), Square(0, 5))); // W
+		// Shuffle back and forth; castling should be invalidated
+		board.make_move(Move(Square(7, 7), Square(7,7))); // W
+		board.make_move(Move(Square(0, 4), Square(0, 5))); // B
+		board.make_move(Move(Square(7, 7), Square(7,7))); // W
 		board.make_move(Move(Square(0, 5), Square(0, 4))); // B
 		let moves = get_moves(Square(0,4), &board);
 		assert_eq!(
 			moves,
 			vec![
-				Move(Square(0, 4),Square(0, 5)),
-				Move(Square(0, 4), Square(0, 3)),
+				Move(Square(0, 4),Square(0, 3)),
+				Move(Square(0, 4), Square(0, 5)),
 			],
 		);
 
+	}
+
+	#[test]
+	fn test_castle() {
+        let mut board = Game::new();
+		let moves = get_moves(Square(0,4), &board);
+		assert_eq!(moves, vec![]);
+
+		// Move everything out of the way to test castling
+		// For bitboard updates to work, we need to execute moves
+		// on the correct color's turn.
+		board.make_move(Move(Square(7, 7), Square(7,7))); // W
+		board.make_move(Move(Square(0, 1), Square(7,7))); // B
+		board.make_move(Move(Square(7, 7), Square(7,7))); // W
+		board.make_move(Move(Square(0, 2), Square(7,6))); // B
+		board.make_move(Move(Square(7, 7), Square(7,7))); // W
+		board.make_move(Move(Square(0, 3), Square(7,5))); // B
+		board.make_move(Move(Square(7, 7), Square(7,7))); // W
+		board.make_move(Move(Square(0, 5), Square(7,4))); // B
+		board.make_move(Move(Square(7, 7), Square(7,7))); // W
+		board.make_move(Move(Square(0, 6), Square(7,3))); // B
+		let moves = get_moves(Square(0, 4), &board);
+		assert_eq!(
+			moves,
+			vec![
+				Move(Square(0, 4), Square(0, 3)),
+				Move(Square(0, 4),Square(0, 5)),
+				Move(Square(0, 4), Square(0, 2)),
+				Move(Square(0, 4), Square(0, 6)),
+			],
+		);
+
+		board.make_move(Move(Square(0, 4), Square(0, 2)));
+		assert_eq!(
+			board.board[0][4].role,
+			Role::Blank,
+		);
+		assert_eq!(
+			board.board[0][2].role,
+			Role::King,
+		);
+		assert_eq!(
+			board.board[0][3].role,
+			Role::Rook,
+		);
 	}
 
 	#[test]

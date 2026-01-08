@@ -77,20 +77,31 @@ fn main() -> () {
 	// }
 
 	// [Queen, King, Rook, Bishop, Knight, Pawn]
-	let bot1_attack_weights = [3.0, 2.0, 1.0, 0.5, 0.5, 0.3];
+	let bot1_attack_weights = [1.0, 1.0, 0.5, 0.3, 0.3, 0.1];
+	let bot1_square_control_weights = [	
+		[0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+		[0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+		[0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+		[0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+		[0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+		[0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+		[0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+		[0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+	];
+	let bot1_piece_weights = [12.0, 20.0, 4.0, 2.1, 2.5, 1.3];
 
-	// max_depth, mobility_weight, square_control_weights, castle_bonus, can_castle_bonus, piece_weights, attack_weights, check_weight, minimax_prune_threshold
-	let bot1 = bot::Bot::new(5, 0.1, bot::DEFAULT_SQUARE_CONTROL_WEIGHTS, 5.0, 3.0, bot::DEFAULT_PIECE_WEIGHTS, bot1_attack_weights, 1.0, 3.0);
-	let bot2 = bot::Bot::new(5, 0.2, bot::DEFAULT_SQUARE_CONTROL_WEIGHTS, 10.0, 1.0, bot::DEFAULT_PIECE_WEIGHTS, bot::DEFAULT_ATTACK_WEIGHTS, 2.0, 5.1);
+	// max_depth, mobility_weight, square_control_weights, castle_bonus, can_castle_bonus, piece_weights, attack_weights, check_weight, pawn_advance_weights
+	let mut bot1 = bot::Bot::new(5, 0.25, bot::DEFAULT_SQUARE_CONTROL_WEIGHTS, 2.0, 1.0, bot1_piece_weights, bot1_attack_weights, 0.8, bot::DEFAULT_PAWN_ADVANCE_WEIGHTS);
+	let mut bot2 = bot::Bot::new(5, 0.05, bot::DEFAULT_SQUARE_CONTROL_WEIGHTS, 3.0, 1.0, bot::DEFAULT_PIECE_WEIGHTS, bot::DEFAULT_ATTACK_WEIGHTS, 0.5, bot::DEFAULT_PAWN_ADVANCE_WEIGHTS);
 		
 	loop {
-		println!("{:?}", game);
+		println!("{:?}\nBitboards:\n{}", game, game.bitboards);
 		if game.checkmate {
 			println!("{} is in Checkmate. Game over.", game.get_turn());
 			break;
 		}
 
-		let (bot_move, score) = bot1.minimax_eval(&mut game, 0, f32::MIN, f32::MAX);
+		let (bot_move, score) = bot1.evaluate_position(&mut game);
 		if bot_move.0 == bot_move.1 {
 			println!("Draw. Game over.");
 			break;
@@ -99,14 +110,14 @@ fn main() -> () {
 		println!("Bot 1 move: {:?}, score: {}", bot_move, score);
 		game.make_move(bot_move);
 
-		println!("{:?}", game);
+		println!("{:?}\nBitboards:\n{}", game, game.bitboards);
 		if game.checkmate {
 			println!("{} is in Checkmate. Game over.", game.get_turn());
 			break;
 		}
 
 
-		let (bot_move, score) = bot2.minimax_eval(&mut game, 0, f32::MIN, f32::MAX);
+		let (bot_move, score) = bot2.evaluate_position(&mut game);
 		if bot_move.0 == bot_move.1 {
 			println!("Draw. Game over.");
 			break;
