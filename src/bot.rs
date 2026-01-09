@@ -1,48 +1,8 @@
 use crate::game;
-use std::rc::Rc;
+use crate::transposition_tables::{TranspositionTable};
 use std::cmp::Ordering;
 
-const TRANSPOSITION_TABLE_SIZE: usize = 65536;
-
-pub struct TranspositionTable {
-	table: Vec<Option<(Rc<game::GameState>, f32, usize)>>,
-	clear_at: usize,
-}
-
-impl TranspositionTable {
-	pub fn new() -> TranspositionTable {
-		let mut table = Vec::with_capacity(TRANSPOSITION_TABLE_SIZE);
-        table.resize(TRANSPOSITION_TABLE_SIZE, None);
-        TranspositionTable { table, clear_at: 0 }
-	}
-
-	// Doesn't actually clear the table, just sets the clear_at to the current move count
-	// This makes it so that entries before clear_at are ignored when setting new entries
-	pub fn clear(&mut self, game: &game::Game) -> () {
-		self.clear_at = game.move_count;
-	}
-
-	pub fn get(&self, game: &game::Game) -> Option<f32> {
-		if let Some(entry) = &self.table[game.state.zobrist_hash.hash as usize] {
-			if game.move_count >= self.clear_at && entry.0 == game.state {
-				return Some(entry.1);
-			}
-			return None;
-		}
-		None
-	}
-
-	pub fn set(&mut self, game: &game::Game, score: f32) {
-		let hash = game.state.zobrist_hash.clone();
-		self.table[hash.hash as usize] = Some((Rc::clone(&game.state), score, game.move_count));
-	}
-}
-
 pub struct Bot {
-	transposition_table: TranspositionTable,
-	eval_tables: [TranspositionTable; 2],
-	current_evals_table: usize,
-
 	max_depth: u32,
 	mobility_weight: f32,
 	square_control_weights: [[f32; 8]; 8],
@@ -56,7 +16,7 @@ pub struct Bot {
 
 impl Bot {
 	pub fn new(max_depth: u32, mobility_weight: f32, square_control_weights: [[f32; 8]; 8], castle_bonus: f32, can_castle_bonus: f32, piece_weights: [f32; 6], attack_weights: [f32; 6], check_weight: f32, pawn_advance_weights: [f32; 6]) -> Bot {
-		Bot { transposition_table: TranspositionTable::new(), eval_tables: [TranspositionTable::new(), TranspositionTable::new()], current_evals_table: 0, max_depth, mobility_weight, square_control_weights, castle_bonus, can_castle_bonus, piece_weights, attack_weights, check_weight, pawn_advance_weights }
+		Bot { max_depth, mobility_weight, square_control_weights, castle_bonus, can_castle_bonus, piece_weights, attack_weights, check_weight, pawn_advance_weights }
 	}
 }
 // Hardcode a max depth for now, to avoid multithreading + waiting
@@ -114,34 +74,33 @@ pub fn default_attack_weight(role: game::Role) -> f32 {
 }
 
 // TODO:
-// - Implement transposition table for depth 1 and use it for A/B move ordering.
-//   ie. Move with best depth 5 score should be checked first at depth 6.
-
-// Notes:
+// - Honestly a transposition table will not speed this up enough, even with iterative deepening.
+//   Most likely we just need boring old game state simplification and move calculation optimization.
+//   - Store possible attack bitboards, and skip check/checkmate confirmation if the king is definitely
+//     safe.
+//   - Implement magic bitboards for bishop, rook, queen moves.
+//   - Make game state static, and store a history of reversible moves (move + check states + maybe piece taken)
+//   - Maybe don't look for check or checkmate at the bottom iterations?
+//   - Make move list generation faster
 // - For Transposition Table to do anything, we need to run and cache at greater depth.
 //   Even depth 2 should be much better, since it will account for move ordering.
 //   This also requires us to build a system to make in-progress evaluations portable.
 //   We'll have to pick up and resume evaluations from where we left off.
-// - Move ordering for A/B pruning is also sorely needed. Probably even more so than transposition table.
 // - Once speed to ~depth 6 is good, implement tournament tuning of weights
 impl Bot {
-	pub fn evaluate_position(&mut self, game: &mut game::Game) -> (game::Move, f32) {
-		let (mv, score) = self.minimax_eval(game, 0, f32::MIN, f32::MAX);
-		self.current_evals_table = (self.current_evals_table + 1) % 2;
-		if game.since_last_non_reversible_move == 0 || game.since_last_non_reversible_move == 1 {
-			self.transposition_table.clear(game);
-		}
+	pub fn evaluate_position(&mut self, game: &mut game::Game, transposition_tables: &mut [TranspositionTable; 2]) -> (game::Move, f32) {
+		let (mv, score) = self.minimax_eval(game, 0, f32::MIN, f32::MAX, transposition_tables);
 		(mv, score)
 	}
 
-	pub fn minimax_eval(&mut self, game: &mut game::Game, depth: u32, mut floor: f32, mut ceil: f32) -> (game::Move, f32) {
+	pub fn minimax_eval(&mut self, game: &mut game::Game, depth: u32, mut floor: f32, mut ceil: f32, transposition_tables: &mut [TranspositionTable; 2]) -> (game::Move, f32) {
 		let mut moves = game.move_list.as_ref().unwrap().clone();
 
 		if depth == 0 {
 			let is_white_turn = game.get_turn() == game::Color::White;
 			let mut moves_with_scores = moves.iter().map(|mv| {
 				game.make_move(*mv);
-				let score = self.eval_tables[self.current_evals_table].get(game);
+				let score = transposition_tables[if game.get_turn() == game::Color::White { 1 } else { 0 }].get(game);
 				game.reverse();
 				(mv, score)
 			}).collect::<Vec<(&game::Move, Option<f32>)>>();
@@ -155,9 +114,6 @@ impl Bot {
 							a.partial_cmp(b).unwrap_or(Ordering::Equal)
 						}
 					}
-
-					// If we checked it before that might actually mean 
-					// it is better, since it wasn't A/B pruned out
 					(Some(_), None) => {
 						Ordering::Less
 					}
@@ -175,7 +131,7 @@ impl Bot {
 
 		let mut best_move = game::Move(game::Square(0,0), game::Square(0,0));
 		let mut best_score = if game.get_turn() == game::Color::White { f32::MIN } else { f32::MAX };
-		for (i, mv) in moves.into_iter().enumerate() {
+		for mv in moves {
 			game.make_move(mv);
 			match game::get_other_color(game.turn) {
 				game::Color::White => if game.white_check {
@@ -197,21 +153,16 @@ impl Bot {
 			let score = if self.check_for_repetition(game) {
 				0.0
 			} else if depth == 0 {
-				// if let Some(transposition_score) = self.transposition_table.get(game) {
-				// 	transposition_score
-				// } else {
-					let (_, base_score) = self.minimax_eval(game, depth + 1, floor, ceil);
-					let score = base_score + self.do_castle_bonus(game, &mv);
-					self.transposition_table.set(game, score);
-					score
-				// }
+				let (_, base_score) = self.minimax_eval(game, depth + 1, floor, ceil, transposition_tables);
+				let score = base_score + self.do_castle_bonus(game, &mv);
+				score
 			} else if depth < self.max_depth - 1 {
-				if depth == 2 {
-					let (_, score) = self.minimax_eval(game, depth + 1, floor, ceil);
-					self.eval_tables[(self.current_evals_table + 1) % 2].set(game, score);
+				if depth == 1 {
+					let (_, score) = self.minimax_eval(game, depth + 1, floor, ceil, transposition_tables);
+					transposition_tables[if game.get_turn() == game::Color::White { 1 } else { 0 }].set(game, score);
 					score
 				} else {
-					let (_, score) = self.minimax_eval(game, depth + 1, floor, ceil);
+					let (_, score) = self.minimax_eval(game, depth + 1, floor, ceil, transposition_tables);
 					score
 				}
 			} else { // At max depth, evaluate the position.
@@ -230,7 +181,7 @@ impl Bot {
 				// Always update alpha (floor) - it's the best score we've found so far
 				floor = if score > floor { score } else { floor };
 				// Beta cutoff: if alpha >= beta, opponent won't allow this branch
-				if floor >= ceil && depth > 2 {
+				if floor >= ceil {
 					break; // Prune remaining moves
 				}
 			} else {
@@ -242,7 +193,7 @@ impl Bot {
 				// Always update beta (ceil) - it's the best score we've found so far
 				ceil = if score < ceil { score } else { ceil };
 				// Alpha cutoff: if beta <= alpha, opponent won't allow this branch
-				if ceil <= floor && depth > 2 {
+				if ceil <= floor {
 					break; // Prune remaining moves
 				}
 			}
@@ -262,7 +213,6 @@ impl Bot {
 		}
 
 		let original_game_state = &game.state;
-		let original_turn = game.state.turn;
 
 		// In theory this can be optimized by only checking every other move,
 		// but it's not worth the complexity for now.

@@ -1,14 +1,15 @@
 use std::fmt;
 use std::ops::Deref;
 use std::rc::Rc;
-use std::hash::{Hash, Hasher};
 use rand::Rng;
 use colored::Colorize;
 use once_cell::sync::Lazy;
 
+use crate::constants::{TRANSPOSITION_TABLE_SIZE, ALL_KNIGHT_MASKS, ALL_KING_MASKS, ALL_ROOK_MASKS, ALL_BISHOP_MASKS};
+
 fn generate_zobrist_number() -> u64 {
 	let mut rng = rand::rng();
-	rng.random_range(0..65536)
+	rng.random_range(0..TRANSPOSITION_TABLE_SIZE as u64)
 }
 
 fn role_to_zobrist_index(role: Role, color: Color, square: Square) -> usize {
@@ -112,67 +113,6 @@ impl ZobristHash {
 		}
 	}
 }
-
-const fn compute_knight_mask(idx: usize) -> u64 {
-    let row = idx / 8;
-    let col = idx % 8;
-    let mut mask = 0u64;
-    let moves = [
-        (1, 2), (2, 1), (-1, 2), (2, -1),
-        (1, -2), (-2, 1), (-1, -2), (-2, -1),
-    ];
-    let mut i = 0;
-    while i < 8 {
-        let (dx, dy) = moves[i];
-        let new_x = row as i8 + dx;
-        let new_y = col as i8 + dy;
-        if new_x >= 0 && new_x < 8 && new_y >= 0 && new_y < 8 {
-            mask |= 1u64 << (new_x as usize * 8 + new_y as usize);
-        }
-        i += 1;
-    }
-    mask
-}
-
-// Pre-computed knight masks for all squares
-const ALL_KNIGHT_MASKS: [u64; 64] = {
-    let mut masks = [0u64; 64];
-    let mut i = 0;
-    while i < 64 {
-        masks[i] = compute_knight_mask(i);
-        i += 1;
-    }
-    masks
-};
-
-const KING_MOVE_PAIRS: [(i8, i8); 8] = [(0,1), (0,-1), (1,1), (1,0), (1,-1), (-1,1), (-1,0), (-1,-1)];
-
-const fn compute_king_mask(idx: usize) -> u64 {
-	let row = idx / 8;
-	let col = idx % 8;
-	let mut mask = 0u64;
-
-	let mut i = 0;
-    while i < 8 {
-        let (dx, dy) = KING_MOVE_PAIRS[i];
-        let new_x = row as i8 + dx;
-        let new_y = col as i8 + dy;
-        if new_x >= 0 && new_x < 8 && new_y >= 0 && new_y < 8 {
-            mask |= 1u64 << (new_x as usize * 8 + new_y as usize);
-        }
-        i += 1;
-    }
-    mask
-}
-const ALL_KING_MASKS: [u64; 64] = {
-	let mut masks = [0u64; 64];
-	let mut i = 0;
-	while i < 64 {
-		masks[i] = compute_king_mask(i);
-		i += 1;
-	}
-	masks
-};
 
 const fn sq_to_idx(sq: Square) -> usize {
 	sq.0 * 8 + sq.1
@@ -319,6 +259,39 @@ impl GameState {
     fn is_square_blank(&self, sq: &Square) -> bool {
 		self.board[sq.0][sq.1].color == Color::Blank
 	}
+
+	pub fn lazy_get_check_states(&self, game_state: &GameState) -> (bool, bool) {
+		let mut black_king_mask = 0u64;
+		let mut white_king_mask = 0u64;
+		let mut black_attacks_mask = 0u64;
+		let mut white_attacks_mask = 0u64;
+		for x in 0..64 {
+			let piece = new_state.board[x / 8][x % 8];
+			if piece.color == Color::Black {
+				match piece.role {
+					Role::King => black_king_mask |= 1u64 << x,
+					Role::Queen => black_attacks_mask |= ALL_ROOK_MASKS[x] | ALL_BISHOP_MASKS[x],
+					Role::Rook => black_attacks_mask |= ALL_ROOK_MASKS[x],
+					Role::Bishop => black_attacks_mask |= ALL_BISHOP_MASKS[x],
+					Role::Knight => black_attacks_mask |= ALL_KNIGHT_MASKS[x],
+					Role::Pawn => black_attacks_mask |= ALL_BLACK_PAWN_MASKS[x],
+					_ => ()
+				}
+			} else if piece.color == Color::White {
+				match piece.role {
+					Role::King => white_king_mask |= 1u64 << x,
+					Role::Queen => white_attacks_mask |= ALL_ROOK_MASKS[x] | ALL_BISHOP_MASKS[x],
+					Role::Rook => white_attacks_mask |= ALL_ROOK_MASKS[x],
+					Role::Bishop => white_attacks_mask |= ALL_BISHOP_MASKS[x],
+					Role::Knight => white_attacks_mask |= ALL_KNIGHT_MASKS[x],
+					Role::Pawn => white_attacks_mask |= ALL_WHITE_PAWN_MASKS[x],
+					_ => ()
+				}
+			}
+		}
+
+		(white_king_mask & white_attacks_mask != 0, black_king_mask & black_attacks_mask != 0)
+	};
 
 	#[inline(never)]
 	pub fn generate_new_state(&self, mv: &Move) -> GameState {

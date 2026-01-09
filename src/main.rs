@@ -1,10 +1,11 @@
 mod game;
 mod bot;
+mod transposition_tables;
+mod constants;
 
 use std::time::Instant;
 use std::error::Error;
 use std::io;
-
 
 fn get_user_move() -> Result<game::Move, Box<dyn Error>> {
 	println!("Please enter your move.");
@@ -95,6 +96,10 @@ fn main() -> () {
 	let mut bot1 = bot::Bot::new(6, 0.25, bot::DEFAULT_SQUARE_CONTROL_WEIGHTS, 2.0, 1.0, bot1_piece_weights, bot1_attack_weights, 0.8, bot::DEFAULT_PAWN_ADVANCE_WEIGHTS);
 	let mut bot2 = bot::Bot::new(6, 0.05, bot::DEFAULT_SQUARE_CONTROL_WEIGHTS, 3.0, 1.0, bot::DEFAULT_PIECE_WEIGHTS, bot::DEFAULT_ATTACK_WEIGHTS, 0.5, bot::DEFAULT_PAWN_ADVANCE_WEIGHTS);
 		
+	let mut transposition_tables: [transposition_tables::TranspositionTable; 2] = [
+		transposition_tables::TranspositionTable::new(),
+		transposition_tables::TranspositionTable::new(),
+	];
 	let mut move_calc_durations = Vec::new();
 	loop {
 		println!("{:?}", game);
@@ -102,11 +107,11 @@ fn main() -> () {
 			println!("{} is in Checkmate. Game over.", game.get_turn());
 			println!("Move calculation durations: {:?}", move_calc_durations);
 			println!("Average move calculation duration: {:?}", move_calc_durations.iter().sum::<std::time::Duration>() / move_calc_durations.len() as u32);
-						break;
+			break;
 		}
 
 		let start = Instant::now();
-		let (bot_move, score) = bot1.evaluate_position(&mut game);
+		let (bot_move, score) = bot1.evaluate_position(&mut game, &mut transposition_tables);
 		move_calc_durations.push(start.elapsed());
 		if bot_move.0 == bot_move.1 {
 			println!("Draw. Game over.");
@@ -121,17 +126,17 @@ fn main() -> () {
 			println!("{} is in Checkmate. Game over.", game.get_turn());
 			println!("Move calculation durations: {:?}", move_calc_durations);
 			println!("Average move calculation duration: {:?}", move_calc_durations.iter().sum::<std::time::Duration>() / move_calc_durations.len() as u32);
-						break;
+			break;
 		}
 
 		let start = Instant::now();
-		let (bot_move, score) = bot2.evaluate_position(&mut game);
+		let (bot_move, score) = bot2.evaluate_position(&mut game, &mut transposition_tables);
 		move_calc_durations.push(start.elapsed());
 		if bot_move.0 == bot_move.1 {
 			println!("Draw. Game over.");
 			println!("Move calculation durations: {:?}", move_calc_durations);
 			println!("Average move calculation duration: {:?}", move_calc_durations.iter().sum::<std::time::Duration>() / move_calc_durations.len() as u32);
-						break;
+			break;
 		}
 
 		println!("Bot 2 move: {:?}, score: {}", bot_move, score);
@@ -141,7 +146,7 @@ fn main() -> () {
 			println!("Draw by repetition. Game over.");
 			println!("Move calculation durations: {:?}", move_calc_durations);
 			println!("Average move calculation duration: {:?}", move_calc_durations.iter().sum::<std::time::Duration>() / move_calc_durations.len() as u32);
-						break;
+			break;
 		}
 	}
 }
