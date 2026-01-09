@@ -432,12 +432,28 @@ impl GameState {
 		let mut white_attacks_mask = 0u64;
 
 		let mut white_pieces_bitboard = game_state.bitboards.white_material;
+		println!("board:\n{:?}", game_state);
+
 		while white_pieces_bitboard != 0 {
 			let piece_idx = white_pieces_bitboard.trailing_zeros() as usize;
 			let piece = game_state.board[piece_idx / 8][piece_idx % 8];
 			match piece.role {
 				Role::King => white_king_mask |= 1u64 << piece_idx,
-				Role::Queen => white_attacks_mask |= ALL_ROOK_MASKS[piece_idx] | ALL_BISHOP_MASKS[piece_idx],
+				Role::Queen => {
+					white_attacks_mask |= ALL_ROOK_MASKS[piece_idx] | ALL_BISHOP_MASKS[piece_idx];
+					println!("Queen attack mask");
+					for rank in (0..8).rev() {
+						for file in 0..8 {
+							let square = rank * 8 + file;
+							if ALL_BISHOP_MASKS[piece_idx] & (1u64 << square) != 0 {
+								print!("1");
+							} else {
+								print!("0");
+							}
+						}
+						println!();
+					}
+				},
 				Role::Rook => white_attacks_mask |= ALL_ROOK_MASKS[piece_idx],
 				Role::Bishop => white_attacks_mask |= ALL_BISHOP_MASKS[piece_idx],
 				Role::Knight => white_attacks_mask |= ALL_KNIGHT_MASKS[piece_idx],
@@ -446,6 +462,30 @@ impl GameState {
 			}
 			white_pieces_bitboard ^= 1u64 << piece_idx;
 		}
+	println!("white_king_mask:");
+	for rank in (0..8).rev() {
+		for file in 0..8 {
+			let square = rank * 8 + file;
+			if white_king_mask & (1u64 << square) != 0 {
+				print!("1");
+			} else {
+				print!("0");
+			}
+		}
+		println!();
+	}
+	println!("white_attacks_mask:");
+	for rank in (0..8).rev() {
+		for file in 0..8 {
+			let square = rank * 8 + file;
+			if white_attacks_mask & (1u64 << square) != 0 {
+				print!("1");
+			} else {
+				print!("0");
+			}
+		}
+		println!();
+	}
 
 		let mut black_pieces_bitboard = game_state.bitboards.black_material;
 		while black_pieces_bitboard != 0 {
@@ -463,7 +503,7 @@ impl GameState {
 			black_pieces_bitboard ^= 1u64 << piece_idx;
 		}
 
-		(white_king_mask & white_attacks_mask != 0, black_king_mask & black_attacks_mask != 0)
+		(white_king_mask & black_attacks_mask != 0, black_king_mask & white_attacks_mask != 0)
 	}
 
 
