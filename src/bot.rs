@@ -88,12 +88,12 @@ pub fn default_attack_weight(role: game::Role) -> f32 {
 //   We'll have to pick up and resume evaluations from where we left off.
 // - Once speed to ~depth 6 is good, implement tournament tuning of weights
 impl Bot {
-	pub fn evaluate_position(&mut self, game: &mut game::Game, transposition_tables: &mut [TranspositionTable; 2]) -> (game::Move, f32) {
+	pub fn evaluate_position(&self, game: &mut game::Game, transposition_tables: &mut [TranspositionTable; 2]) -> (game::Move, f32) {
 		let (mv, score) = self.minimax_eval(game, 0, f32::MIN, f32::MAX, transposition_tables);
 		(mv, score)
 	}
 
-	pub fn minimax_eval(&mut self, game: &mut game::Game, depth: u32, mut floor: f32, mut ceil: f32, transposition_tables: &mut [TranspositionTable; 2]) -> (game::Move, f32) {
+	pub fn minimax_eval(&self, game: &mut game::Game, depth: u32, mut floor: f32, mut ceil: f32, transposition_tables: &mut [TranspositionTable; 2]) -> (game::Move, f32) {
 		let mut moves = game.move_list.as_ref().unwrap().clone();
 
 		if depth == 0 {
@@ -451,12 +451,14 @@ mod tests {
 			move_list: None, // Max possible moves in chess
 			parent: None,
 			since_last_non_reversible_move: 0,
+			move_count: 0,
+			zobrist_hash: game::ZobristHash::new(),
 		};
 		starting_game_state.move_list = Some(game::get_all_valid_moves_fast(&starting_game_state, Some(game::Color::Black)));
 
 		let mut game = game::Game::from(starting_game_state);
 		let bot = Bot::new(3, 0.1, DEFAULT_SQUARE_CONTROL_WEIGHTS, 5.0, 2.0, DEFAULT_PIECE_WEIGHTS, DEFAULT_ATTACK_WEIGHTS, 0.5, DEFAULT_PAWN_ADVANCE_WEIGHTS);
-		let (mv, score) = bot.minimax_eval(&mut game, 0, f32::MIN, f32::MAX);
+		let (mv, score) = bot.evaluate_position(&mut game, &mut [TranspositionTable::new(), TranspositionTable::new()]);
 		assert_eq!(mv, game::Move(game::Square(1, 3), game::Square(5, 7)));
 		assert_eq!(score, -100000.0);
 	}

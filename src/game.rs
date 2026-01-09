@@ -5,7 +5,7 @@ use rand::Rng;
 use colored::Colorize;
 use once_cell::sync::Lazy;
 
-use crate::constants::{TRANSPOSITION_TABLE_SIZE, ALL_KNIGHT_MASKS, ALL_KING_MASKS, ALL_ROOK_MASKS, ALL_BISHOP_MASKS};
+use crate::constants::{TRANSPOSITION_TABLE_SIZE, ALL_KNIGHT_MASKS, ALL_KING_MASKS, ALL_ROOK_MASKS, ALL_BISHOP_MASKS, ALL_BLACK_PAWN_MASKS, ALL_WHITE_PAWN_MASKS};
 
 fn generate_zobrist_number() -> u64 {
 	let mut rng = rand::rng();
@@ -260,39 +260,7 @@ impl GameState {
 		self.board[sq.0][sq.1].color == Color::Blank
 	}
 
-	pub fn lazy_get_check_states(&self, game_state: &GameState) -> (bool, bool) {
-		let mut black_king_mask = 0u64;
-		let mut white_king_mask = 0u64;
-		let mut black_attacks_mask = 0u64;
-		let mut white_attacks_mask = 0u64;
-		for x in 0..64 {
-			let piece = new_state.board[x / 8][x % 8];
-			if piece.color == Color::Black {
-				match piece.role {
-					Role::King => black_king_mask |= 1u64 << x,
-					Role::Queen => black_attacks_mask |= ALL_ROOK_MASKS[x] | ALL_BISHOP_MASKS[x],
-					Role::Rook => black_attacks_mask |= ALL_ROOK_MASKS[x],
-					Role::Bishop => black_attacks_mask |= ALL_BISHOP_MASKS[x],
-					Role::Knight => black_attacks_mask |= ALL_KNIGHT_MASKS[x],
-					Role::Pawn => black_attacks_mask |= ALL_BLACK_PAWN_MASKS[x],
-					_ => ()
-				}
-			} else if piece.color == Color::White {
-				match piece.role {
-					Role::King => white_king_mask |= 1u64 << x,
-					Role::Queen => white_attacks_mask |= ALL_ROOK_MASKS[x] | ALL_BISHOP_MASKS[x],
-					Role::Rook => white_attacks_mask |= ALL_ROOK_MASKS[x],
-					Role::Bishop => white_attacks_mask |= ALL_BISHOP_MASKS[x],
-					Role::Knight => white_attacks_mask |= ALL_KNIGHT_MASKS[x],
-					Role::Pawn => white_attacks_mask |= ALL_WHITE_PAWN_MASKS[x],
-					_ => ()
-				}
-			}
-		}
-
-		(white_king_mask & white_attacks_mask != 0, black_king_mask & black_attacks_mask != 0)
-	};
-
+	
 	#[inline(never)]
 	pub fn generate_new_state(&self, mv: &Move) -> GameState {
 		// Create a new GameState with the move applied. Do not modify self.
@@ -383,26 +351,35 @@ impl GameState {
 			move_count: self.move_count + 1,
 		};
 
-		let black_moves = get_all_valid_moves_fast(&new_state, Some(Color::Black));
-		let white_moves = get_all_valid_moves_fast(&new_state, Some(Color::White));
+		let mut black_moves = get_all_valid_moves_fast(&new_state, Some(Color::Black));
+		let mut white_moves = get_all_valid_moves_fast(&new_state, Some(Color::White));
 
-		let white_check = black_moves.iter().fold(false, |acc, mv| {
-			let to_piece = new_state.board[mv.1.0][mv.1.1];
-			if to_piece.role == Role::King {
-				acc || to_piece.color == Color::White
-			} else {
-				acc
-			}
-		});
+		let (lazy_white_check, lazy_black_check) = get_check_states_lazy(&new_state);
+		let white_check = if !lazy_white_check {
+			false
+		} else {
+			black_moves.iter().fold(false, |acc, mv| {
+				let to_piece = new_state.board[mv.1.0][mv.1.1];
+				if to_piece.role == Role::King {
+					acc || to_piece.color == Color::White
+				} else {
+					acc
+				}
+			})
+		};
 
-		let black_check = white_moves.iter().fold(false, |acc, mv| {
-			let to_piece = new_state.board[mv.1.0][mv.1.1];
-			if to_piece.role == Role::King {
-				acc || to_piece.color == Color::Black
-			} else {
-				acc
-			}
-		});
+		let black_check = if !lazy_black_check {
+			false
+		} else {
+			white_moves.iter().fold(false, |acc, mv| {
+				let to_piece = new_state.board[mv.1.0][mv.1.1];
+				if to_piece.role == Role::King {
+					acc || to_piece.color == Color::Black
+				} else {
+					acc
+				}
+			})
+		};
 
 
 		// TODO: Can roll this into the check checks to avoid 2 passes
@@ -418,7 +395,11 @@ impl GameState {
 
 		new_state.white_check = white_check;
 		new_state.black_check = black_check;
-		new_state.move_list = Some(if new_state.turn == Color::White { white_moves } else { black_moves });
+		new_state.move_list = Some(if new_state.turn == Color::White {
+			white_moves
+		} else {
+			black_moves
+		});
 
 		let mut new_zobrist_hash = self.zobrist_hash.clone();
 		new_zobrist_hash.update_move(self, &mv);
@@ -442,6 +423,49 @@ impl GameState {
 		return new_state;
 	}
 }
+
+#[inline(never)]
+	pub fn get_check_states_lazy(game_state: &GameState) -> (bool, bool) {
+		let mut black_king_mask = 0u64;
+		let mut white_king_mask = 0u64;
+		let mut black_attacks_mask = 0u64;
+		let mut white_attacks_mask = 0u64;
+
+		let mut white_pieces_bitboard = game_state.bitboards.white_material;
+		while white_pieces_bitboard != 0 {
+			let piece_idx = white_pieces_bitboard.trailing_zeros() as usize;
+			let piece = game_state.board[piece_idx / 8][piece_idx % 8];
+			match piece.role {
+				Role::King => white_king_mask |= 1u64 << piece_idx,
+				Role::Queen => white_attacks_mask |= ALL_ROOK_MASKS[piece_idx] | ALL_BISHOP_MASKS[piece_idx],
+				Role::Rook => white_attacks_mask |= ALL_ROOK_MASKS[piece_idx],
+				Role::Bishop => white_attacks_mask |= ALL_BISHOP_MASKS[piece_idx],
+				Role::Knight => white_attacks_mask |= ALL_KNIGHT_MASKS[piece_idx],
+				Role::Pawn => white_attacks_mask |= ALL_WHITE_PAWN_MASKS[piece_idx],
+				_ => ()
+			}
+			white_pieces_bitboard ^= 1u64 << piece_idx;
+		}
+
+		let mut black_pieces_bitboard = game_state.bitboards.black_material;
+		while black_pieces_bitboard != 0 {
+			let piece_idx = black_pieces_bitboard.trailing_zeros() as usize;
+			let piece = game_state.board[piece_idx / 8][piece_idx % 8];
+			match piece.role {
+				Role::King => black_king_mask |= 1u64 << piece_idx,
+				Role::Queen => black_attacks_mask |= ALL_ROOK_MASKS[piece_idx] | ALL_BISHOP_MASKS[piece_idx],
+				Role::Rook => black_attacks_mask |= ALL_ROOK_MASKS[piece_idx],
+				Role::Bishop => black_attacks_mask |= ALL_BISHOP_MASKS[piece_idx],
+				Role::Knight => black_attacks_mask |= ALL_KNIGHT_MASKS[piece_idx],
+				Role::Pawn => black_attacks_mask |= ALL_BLACK_PAWN_MASKS[piece_idx],
+				_ => ()
+			}
+			black_pieces_bitboard ^= 1u64 << piece_idx;
+		}
+
+		(white_king_mask & white_attacks_mask != 0, black_king_mask & black_attacks_mask != 0)
+	}
+
 
 // Game is just a reference to a GameState, enabling branching
 #[derive(Clone)]
@@ -873,13 +897,13 @@ pub fn get_all_valid_moves_fast(game: &GameState, color_override: Option<Color>)
 	// TODO: There should be a "Max possible moves" value in chess,
 	// So we can pre-allocate and re-use an array to accel this.
 	let mut moves = Vec::with_capacity(218);
+	let color = if color_override.is_some() { color_override.unwrap() } else { game.turn };
+	let mut pieces_bitboard = if color == Color::White { game.bitboards.white_material } else { game.bitboards.black_material };
 
-	for x in 0..8 {
-		for y in 0..8 {
-			let piece = game.board[x][y];
-			let sq = Square(x, y);
-			let color = if color_override.is_some() { color_override.unwrap() } else { game.turn };
-		if piece.color == color {
+	while pieces_bitboard != 0 {
+		let piece_idx = pieces_bitboard.trailing_zeros() as usize;
+		let sq = idx_to_sq(piece_idx);
+		let piece = game.board[sq.0][sq.1];
 			match piece.role {
 				Role::Queen => {
 					add_moves_step_out(&mut moves, &sq, game, piece.color, &QUEEN_MOVE_PAIRS);
@@ -895,7 +919,7 @@ pub fn get_all_valid_moves_fast(game: &GameState, color_override: Option<Color>)
 					while king_mask != 0 {
 						let idx = king_mask.trailing_zeros() as usize;
 						moves.push(Move(sq, idx_to_sq(idx)));
-						king_mask &= king_mask - 1;
+						king_mask ^= 1u64 << idx;
 					}
 		
 					match piece.color {
@@ -1011,8 +1035,7 @@ pub fn get_all_valid_moves_fast(game: &GameState, color_override: Option<Color>)
 				}
 				Role::Blank => ()
 			}
-		}
-	}
+		pieces_bitboard ^= 1u64 << piece_idx;
 	}
 	moves
 }
