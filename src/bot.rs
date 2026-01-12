@@ -35,8 +35,6 @@ pub const DEFAULT_SQUARE_CONTROL_WEIGHTS: [[f32; 8]; 8] = [
 ];
 
 // Bonus for castling specifically-- since king mobility is _good_ but castling is _better_
-// TODO: This doesn't work, we need to reward this in a nested manner. As it stands, it just
-// applies to the bottom-layer of the tree.
 pub const DEFAULT_CASTLE_BONUS: f32 = 10.0;
 
 // Bonus for maintaining the ability to castle
@@ -76,12 +74,9 @@ pub fn default_attack_weight(role: game::Role) -> f32 {
 // TODO:
 // - Honestly a transposition table will not speed this up enough, even with iterative deepening.
 //   Most likely we just need boring old game state simplification and move calculation optimization.
-//   - Store possible attack bitboards, and skip check/checkmate confirmation if the king is definitely
-//     safe.
-//   - Implement magic bitboards for bishop, rook, queen moves.
+//   - Remove Move dependency, just pass around bitboards.
 //   - Make game state static, and store a history of reversible moves (move + check states + maybe piece taken)
 //   - Maybe don't look for check or checkmate at the bottom iterations?
-//   - Make move list generation faster
 // - For Transposition Table to do anything, we need to run and cache at greater depth.
 //   Even depth 2 should be much better, since it will account for move ordering.
 //   This also requires us to build a system to make in-progress evaluations portable.
@@ -94,7 +89,7 @@ impl Bot {
 	}
 
 	pub fn minimax_eval(&self, game: &mut game::Game, depth: u32, mut floor: f32, mut ceil: f32, transposition_tables: &mut [TranspositionTable; 2]) -> (game::Move, f32) {
-		let mut moves = game.move_list.as_ref().unwrap().clone();
+		let mut moves = game.get_move_list();
 
 		if depth == 0 {
 			let is_white_turn = game.get_turn() == game::Color::White;
@@ -166,7 +161,7 @@ impl Bot {
 					score
 				}
 			} else { // At max depth, evaluate the position.
-				self.eval(game, game.move_list.as_ref().unwrap())
+				self.eval(game)
 			};
 
 			game.reverse(); 
@@ -235,16 +230,13 @@ impl Bot {
 
 	// To generate an evaluation score from White's perspective
 	// Positive = good for White, Negative = good for Black
-	fn eval(&self, game_state: &game::GameState, moves: &Vec<game::Move>) -> f32 {
-		// Mobility is not re-calculated for opposing player as an optimization
-		let prev_moves = game_state.parent.as_ref().unwrap().move_list.as_ref().unwrap();
-
+	fn eval(&self, game_state: &game::GameState) -> f32 {
 		// Calculate White's advantages (positive)
 		let white_material = self.material_score(game_state, game::Color::White);
 		let white_attack = self.attack_score(game_state, moves, game::Color::White);
 		let white_control = self.control_score(game_state, game::Color::White);
 		let white_check = self.check_score(game_state, game::Color::White);
-		let white_mobility = self.mobility_score(if game_state.turn == game::Color::White { moves } else { prev_moves });
+		let white_mobility = self.mobility_score(game_state, game::Color::White);
 		let white_can_castle_bonus = self.can_castle_bonus(game_state, game::Color::White);
 		let white_pawn_advance = self.pawn_advance_score(game_state, game::Color::White);
 
@@ -253,7 +245,7 @@ impl Bot {
 		let black_attack = self.attack_score(game_state, moves, game::Color::Black);
 		let black_control = self.control_score(game_state, game::Color::Black);
 		let black_check = self.check_score(game_state, game::Color::Black);
-		let black_mobility = self.mobility_score(if game_state.turn == game::Color::Black { moves } else { prev_moves });
+		let black_mobility = self.mobility_score(game_state, game::Color::Black);
 		let black_can_castle_bonus = self.can_castle_bonus(game_state, game::Color::Black);
 		let black_pawn_advance = self.pawn_advance_score(game_state, game::Color::Black);
 	
@@ -261,8 +253,14 @@ impl Bot {
 		(black_material + black_attack + black_control + black_can_castle_bonus + black_check + black_mobility + black_pawn_advance)
 	}
 
-	fn mobility_score(&self, moves: &Vec<game::Move>) -> f32 {
-		moves.len() as f32 * self.mobility_weight
+	fn mobility_score(&self, game_state: &game::GameState, color: game::Color) -> f32 {
+		self.mobility_weight * (
+			if color == game::Color::White {
+				game_state.bitboards.white_mobility.count_ones() as f32
+			} else {
+				game_state.bitboards.black_mobility.count_ones() as f32
+			}
+		)
 	}
 
 	fn material_score(&self, game_state: &game::GameState, color: game::Color) -> f32 {
@@ -278,15 +276,13 @@ impl Bot {
 		score
 	}
 
-	fn attack_score(&self, game_state: &game::GameState, moves: &Vec<game::Move>, color: game::Color) -> f32 {
-		let mut score = 0.0;
-		for mv in moves {
-			let target_role = game_state.board[mv.1.0][mv.1.1].role;
-			if game_state.board[mv.1.0][mv.1.1].color == game::get_other_color(color) {
-				score += self.attack_weights[target_role as usize];
-			}
+	// TODO: Not weighted per-piece
+	fn attack_score(&self, game_state: &game::GameState, color: game::Color) -> f32 {
+		self.attack_weights[0] * if color == game::Color::White {
+			(game_state.bitboards.white_material & game_state.bitboards.black_mobility).count_ones() as f32
+		} else {
+			(game_state.bitboards.black_material & game_state.bitboards.white_mobility).count_ones() as f32
 		}
-		score
 	}
 
 	// Center control is only valued on pawns-- for other pieces just mobility is enough
@@ -454,6 +450,7 @@ mod tests {
 			move_count: 0,
 			zobrist_hash: game::ZobristHash::new(),
 		};
+		starting_game_state.bitboards = game::Bitboards::from(&starting_game_state);
 		starting_game_state.move_list = Some(game::get_all_valid_moves_fast(&starting_game_state, Some(game::Color::Black)));
 
 		let mut game = game::Game::from(starting_game_state);
