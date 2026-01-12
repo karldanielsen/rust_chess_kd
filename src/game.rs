@@ -4,6 +4,7 @@ use std::rc::Rc;
 use rand::Rng;
 use colored::Colorize;
 use once_cell::sync::Lazy;
+use once_cell::unsync::OnceCell;
 
 use crate::magic_tables::get_bishop_moves;
 use crate::magic_tables::get_rook_moves;
@@ -255,7 +256,7 @@ pub struct GameState {
 	pub white_check: bool,
 	pub black_check: bool,
 	pub checkmate: bool,
-	pub move_list: Option<Vec<Move>>,
+	pub move_list: OnceCell<Vec<Move>>,
 	pub bitboards: Bitboards,
 	pub zobrist_hash: ZobristHash,
 
@@ -291,11 +292,8 @@ impl GameState {
 		self.board[sq.0][sq.1].color == Color::Blank
 	}
 
-	pub fn get_move_list(&mut self) -> &Vec<Move> {
-		if self.move_list.is_none() {
-			self.move_list = Some(get_all_valid_moves_fast(self, None));
-		}
-		self.move_list.as_ref().unwrap()
+	pub fn get_move_list(&self) -> &Vec<Move> {
+		self.move_list.get_or_init(|| get_all_valid_moves_fast(self, None))
 	}
 
 	pub fn generate_new_state_no_derived(&self, mv: &Move) -> GameState {
@@ -376,7 +374,7 @@ impl GameState {
 			white_castle_right,
 			black_castle_left,
 			black_castle_right,
-			move_list: None,
+			move_list: OnceCell::new(),
 			white_check: false,
 			black_check: false,
 			checkmate: false,
@@ -592,7 +590,7 @@ impl Game {
 				black_check: false,
 				checkmate: false,
 				parent: None,
-				move_list: Some(get_all_valid_moves_fast(&game_state, None)),
+				move_list: OnceCell::new()),
 				since_last_non_reversible_move: 0,
 				bitboards: Bitboards {
 					white_material: 0b11111111_11111111_00000000_00000000_00000000_00000000_00000000_00000000,

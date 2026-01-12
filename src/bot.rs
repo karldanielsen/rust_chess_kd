@@ -444,7 +444,7 @@ mod tests {
 			white_check: false,
 			black_check: false,
 			checkmate: false,
-			move_list: None, // Max possible moves in chess
+			move_list: OnceCell::new(), // Max possible moves in chess
 			parent: None,
 			since_last_non_reversible_move: 0,
 			move_count: 0,
