@@ -323,19 +323,19 @@ impl GameState {
 			if mv.1 == Square(7, 2) {
 				new_board[7][3] = new_board[7][0];
 				new_board[7][0] = Piece { role: Role::Blank, color: Color::Blank };
-				new_bitboards.black_material ^= (1u64 << (7 * 8 + 3)) & (1u64 << (7 * 8));
+				new_bitboards.black_material ^= (1u64 << (7 * 8 + 3)) | (1u64 << (7 * 8));
 			} else if mv.1 == Square(7, 6) {
 				new_board[7][5] = new_board[7][7];
 				new_board[7][7] = Piece { role: Role::Blank, color: Color::Blank };
-				new_bitboards.black_material ^= (1u64 << (7 * 8 + 5)) & (1u64 << (7 * 8 + 7));
+				new_bitboards.black_material ^= (1u64 << (7 * 8 + 5)) | (1u64 << (7 * 8 + 7));
 			} else if mv.1 == Square(0, 2) {
 				new_board[0][3] = new_board[0][0];
 				new_board[0][0] = Piece { role: Role::Blank, color: Color::Blank };
-				new_bitboards.white_material ^= (1u64 << (0 * 8 + 3)) & (1u64 << (0 * 8));
+				new_bitboards.white_material ^= (1u64 << (0 * 8 + 3)) | (1u64 << (0 * 8));
 			} else if mv.1 == Square(0, 6) {
 				new_board[0][5] = new_board[0][7];
 				new_board[0][7] = Piece { role: Role::Blank, color: Color::Blank };
-				new_bitboards.white_material ^= (1u64 << 5) & (1u64 << 7);
+				new_bitboards.white_material ^= (1u64 << 5) | (1u64 << 7);
 			}
 		}
 
@@ -397,7 +397,7 @@ impl GameState {
 		let mut white_king_idx = 0;
 		while white_king_bitboard != 0 {
 			let piece_idx = white_king_bitboard.trailing_zeros() as usize;
-			let piece = self.board[idx_to_sq(piece_idx).0][idx_to_sq(piece_idx).1];
+			let piece = new_state.board[idx_to_sq(piece_idx).0][idx_to_sq(piece_idx).1];
 			if piece.role == Role::King {
 				white_king_idx = piece_idx;
 				break;
@@ -409,7 +409,7 @@ impl GameState {
 		let mut black_king_idx = 0;
 		while black_king_bitboard != 0 {
 			let piece_idx = black_king_bitboard.trailing_zeros() as usize;
-			let piece = self.board[idx_to_sq(piece_idx).0][idx_to_sq(piece_idx).1];
+			let piece = new_state.board[idx_to_sq(piece_idx).0][idx_to_sq(piece_idx).1];
 			if piece.role == Role::King {
 				black_king_idx = piece_idx;
 				break;
@@ -590,7 +590,7 @@ impl Game {
 				black_check: false,
 				checkmate: false,
 				parent: None,
-				move_list: OnceCell::new()),
+				move_list: OnceCell::new(),
 				since_last_non_reversible_move: 0,
 				bitboards: Bitboards {
 					white_material: 0b11111111_11111111_00000000_00000000_00000000_00000000_00000000_00000000,
@@ -689,6 +689,7 @@ impl Game {
 	pub fn get_turn(&self) -> Color { self.turn } 
 }
 
+// TODO: Delete this garbage
 fn get_moves_step_out(sq: &Square, game: &GameState, piece_color: Color, steps: &[(i8, i8)]) -> Vec<Move> {
 	let pairs = steps;
 	let mut valid_moves = Vec::with_capacity(20);

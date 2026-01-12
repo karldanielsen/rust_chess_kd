@@ -89,16 +89,26 @@ impl Bot {
 	}
 
 	pub fn minimax_eval(&self, game: &mut game::Game, depth: u32, mut floor: f32, mut ceil: f32, transposition_tables: &mut [TranspositionTable; 2]) -> (game::Move, f32) {
-		let mut moves = game.get_move_list();
-
-		if depth == 0 {
+		// Get move count without holding a reference
+		let move_count = {
+			let moves_ref = game.get_move_list();
+			moves_ref.len()
+		};
+		
+		// For move ordering at depth 0, score each move by getting it individually
+		let move_indices: Vec<usize> = if depth == 0 {
 			let is_white_turn = game.get_turn() == game::Color::White;
-			let mut moves_with_scores = moves.iter().map(|mv| {
-				game.make_move(*mv);
+			let mut moves_with_scores: Vec<(usize, Option<f32>)> = (0..move_count).map(|idx| {
+				// Get move at this index, use it, then drop reference before mutation
+				let mv = {
+					let moves_ref = game.get_move_list();
+					moves_ref[idx]
+				};
+				game.make_move(mv);
 				let score = transposition_tables[if game.get_turn() == game::Color::White { 1 } else { 0 }].get(game);
 				game.reverse();
-				(mv, score)
-			}).collect::<Vec<(&game::Move, Option<f32>)>>();
+				(idx, score)
+			}).collect();
 
 			moves_with_scores.sort_unstable_by(|(_, a_score), (_, b_score)| {
 				match (a_score, b_score) {
@@ -121,12 +131,19 @@ impl Bot {
 				}
 			});
 
-			moves = moves_with_scores.into_iter().map(|(mv, _)| *mv).collect::<Vec<game::Move>>();
-		}
+			moves_with_scores.into_iter().map(|(idx, _)| idx).collect()
+		} else {
+			(0..move_count).collect()
+		};
 
 		let mut best_move = game::Move(game::Square(0,0), game::Square(0,0));
 		let mut best_score = if game.get_turn() == game::Color::White { f32::MIN } else { f32::MAX };
-		for mv in moves {
+		for idx in move_indices {
+			// Get move at this index, use it, then drop reference before mutation
+			let mv = {
+				let moves_ref = game.get_move_list();
+				moves_ref[idx]
+			};
 			game.make_move(mv);
 			match game::get_other_color(game.turn) {
 				game::Color::White => if game.white_check {
@@ -161,7 +178,7 @@ impl Bot {
 					score
 				}
 			} else { // At max depth, evaluate the position.
-				self.eval(game)
+				self.eval(&game.state)
 			};
 
 			game.reverse(); 
@@ -233,7 +250,7 @@ impl Bot {
 	fn eval(&self, game_state: &game::GameState) -> f32 {
 		// Calculate White's advantages (positive)
 		let white_material = self.material_score(game_state, game::Color::White);
-		let white_attack = self.attack_score(game_state, moves, game::Color::White);
+		let white_attack = self.attack_score(game_state, game::Color::White);
 		let white_control = self.control_score(game_state, game::Color::White);
 		let white_check = self.check_score(game_state, game::Color::White);
 		let white_mobility = self.mobility_score(game_state, game::Color::White);
@@ -242,7 +259,7 @@ impl Bot {
 
 		// Calculate Black's advantages (negative, since we're from White's perspective)
 		let black_material = self.material_score(game_state, game::Color::Black);
-		let black_attack = self.attack_score(game_state, moves, game::Color::Black);
+		let black_attack = self.attack_score(game_state, game::Color::Black);
 		let black_control = self.control_score(game_state, game::Color::Black);
 		let black_check = self.check_score(game_state, game::Color::Black);
 		let black_mobility = self.mobility_score(game_state, game::Color::Black);
@@ -265,13 +282,17 @@ impl Bot {
 
 	fn material_score(&self, game_state: &game::GameState, color: game::Color) -> f32 {
 		let mut score = 0.0;
-		for x in 0..8 {
-			for y in 0..8 {
-				if game_state.board[x][y].color == color {
-					let role = game_state.board[x][y].role;
-					score += self.piece_weights[role as usize];
-				}
-			}
+		let mut pieces_bitboard = if color == game::Color::White {
+			game_state.bitboards.white_material
+		} else {
+			game_state.bitboards.black_material
+		};
+
+		while pieces_bitboard != 0 {
+			let piece_idx = pieces_bitboard.trailing_zeros() as usize;
+			let role = game_state.board[piece_idx / 8][piece_idx % 8].role;
+			score += self.piece_weights[role as usize];
+			pieces_bitboard ^= 1u64 << piece_idx;
 		}
 		score
 	}
@@ -288,12 +309,24 @@ impl Bot {
 	// Center control is only valued on pawns-- for other pieces just mobility is enough
 	fn control_score(&self, game_state: &game::GameState, color: game::Color) -> f32 {
 		let mut score = 0.0;
-		for x in 2..6 {
-			for y in 2..6 {
-				if game_state.board[x][y].color == color && game_state.board[x][y].role == game::Role::Pawn {
+		let mut pieces_bitboard = if color == game::Color::White {
+			game_state.bitboards.white_material
+		} else {
+			game_state.bitboards.black_material
+		};
+
+		while pieces_bitboard != 0 {
+			let piece_idx = pieces_bitboard.trailing_zeros() as usize;
+			let x = piece_idx / 8;
+			let y = piece_idx % 8;
+			// Only count pawns in the center (x in 2..6, y in 2..6)
+			if x >= 2 && x < 6 && y >= 2 && y < 6 {
+				let piece = game_state.board[x][y];
+				if piece.role == game::Role::Pawn {
 					score += self.square_control_weights[x][y];
 				}
 			}
+			pieces_bitboard ^= 1u64 << piece_idx;
 		}
 		score
 	}
@@ -325,13 +358,22 @@ impl Bot {
 
 	fn pawn_advance_score(&self, game_state: &game::GameState, color: game::Color) -> f32 {
 		let mut score = 0.0;
-		for x in 1..7 {
-			for y in 0..8 {
-				if game_state.board[x][y].color == color && game_state.board[x][y].role == game::Role::Pawn {
-					let score_idx = if color == game::Color::White { 5 - (x - 1) as usize } else { (x - 1) as usize };
-					score += self.pawn_advance_weights[score_idx];
-				}
+		let mut pieces_bitboard = if color == game::Color::White {
+			game_state.bitboards.white_material
+		} else {
+			game_state.bitboards.black_material
+		};
+
+		while pieces_bitboard != 0 {
+			let piece_idx = pieces_bitboard.trailing_zeros() as usize;
+			let x = piece_idx / 8;
+			let y = piece_idx % 8;
+			let piece = game_state.board[x][y];
+			if piece.role == game::Role::Pawn && x >= 1 && x < 7 {
+				let score_idx = if color == game::Color::White { 5 - (x - 1) as usize } else { (x - 1) as usize };
+				score += self.pawn_advance_weights[score_idx];
 			}
+			pieces_bitboard ^= 1u64 << piece_idx;
 		}
 		score
 	}
