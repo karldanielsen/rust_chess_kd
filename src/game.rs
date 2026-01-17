@@ -12,7 +12,7 @@ use crate::constants::{TRANSPOSITION_TABLE_SIZE, ALL_KNIGHT_MASKS, ALL_KING_MASK
 
 fn generate_zobrist_number() -> u64 {
 	let mut rng = rand::rng();
-	rng.random_range(0..TRANSPOSITION_TABLE_SIZE as u64)
+	rng.random_range(0..u64::MAX as u64)
 }
 
 fn role_to_zobrist_index(role: Role, color: Color, square: Square) -> usize {
@@ -194,10 +194,25 @@ impl fmt::Display for Piece {
 pub struct Bitboards {
 	pub white_material: u64,
 	pub black_material: u64,
-	// pub white_pawns: u64,
-	// pub black_pawns: u64,
+	pub white_pawns: u64,
+	pub black_pawns: u64,
 	pub white_mobility: u64,
 	pub black_mobility: u64,
+	pub white_king: u64,
+	pub black_king: u64,
+	pub white_queen_moves: u64,
+	pub black_queen_moves: u64,
+	pub white_pawn_moves: u64,
+	pub black_pawn_moves: u64,
+	pub white_king_moves: u64,
+	pub black_king_moves: u64,
+	pub white_bishop_moves: u64,
+	pub black_bishop_moves: u64,
+	pub white_knight_moves: u64,
+	pub black_knight_moves: u64,
+	pub white_rook_moves: u64,
+	pub black_rook_moves: u64,
+	
 }
 
 impl fmt::Display for Bitboards {
@@ -208,7 +223,28 @@ impl fmt::Display for Bitboards {
 
 impl Bitboards {
 	pub fn new() -> Bitboards {
-		Bitboards { white_material: 0, black_material: 0, white_mobility: 0, black_mobility: 0 }
+		Bitboards { 
+			white_material: 0, 
+			black_material: 0, 
+			white_mobility: 0, 
+			black_mobility: 0,
+			white_king: 0,
+			black_king: 0,
+			white_pawns: 0,
+			black_pawns: 0,
+			white_queen_moves: 0,
+			black_queen_moves: 0,
+			white_pawn_moves: 0,
+			black_pawn_moves: 0,
+			white_king_moves: 0,
+			black_king_moves: 0,
+			white_bishop_moves: 0,
+			black_bishop_moves: 0,
+			white_knight_moves: 0,
+			black_knight_moves: 0,
+			white_rook_moves: 0,
+			black_rook_moves: 0,
+		}
 	}
 
 	pub fn from(game_state: &GameState) -> Bitboards {
@@ -237,6 +273,22 @@ impl Bitboards {
 			},
 			white_mobility: 0,
 			black_mobility: 0,
+			white_king: 0,
+			black_king: 0,
+			white_pawns: 0,
+			black_pawns: 0,
+			white_queen_moves: 0,
+			black_queen_moves: 0,
+			white_pawn_moves: 0,
+			black_pawn_moves: 0,
+			white_king_moves: 0,
+			black_king_moves: 0,
+			white_bishop_moves: 0,
+			black_bishop_moves: 0,
+			white_knight_moves: 0,
+			black_knight_moves: 0,
+			white_rook_moves: 0,
+			black_rook_moves: 0,
 		}
 	}
 }
@@ -390,35 +442,11 @@ impl GameState {
 	pub fn generate_new_state(&self, mv: &Move) -> GameState {
 		let mut new_state = self.generate_new_state_no_derived(mv);
 		
-		let white_mobility = get_mobility_bitboard(&new_state, Some(Color::White));
-		let black_mobility = get_mobility_bitboard(&new_state, Some(Color::Black));
-
-		let mut white_king_bitboard = new_state.bitboards.white_material.clone();
-		let mut white_king_idx = 0;
-		while white_king_bitboard != 0 {
-			let piece_idx = white_king_bitboard.trailing_zeros() as usize;
-			let piece = new_state.board[idx_to_sq(piece_idx).0][idx_to_sq(piece_idx).1];
-			if piece.role == Role::King {
-				white_king_idx = piece_idx;
-				break;
-			}
-			white_king_bitboard ^= 1u64 << piece_idx;
-		}
-
-		let mut black_king_bitboard = new_state.bitboards.black_material.clone();
-		let mut black_king_idx = 0;
-		while black_king_bitboard != 0 {
-			let piece_idx = black_king_bitboard.trailing_zeros() as usize;
-			let piece = new_state.board[idx_to_sq(piece_idx).0][idx_to_sq(piece_idx).1];
-			if piece.role == Role::King {
-				black_king_idx = piece_idx;
-				break;
-			}
-			black_king_bitboard ^= 1u64 << piece_idx;
-		}
+		populate_static_bitboards(&mut new_state, Some(Color::White));
+		populate_static_bitboards(&mut new_state, Some(Color::Black));
 		
-		new_state.white_check = 1u64 << white_king_idx & black_mobility > 0;
-		new_state.black_check = 1u64 << black_king_idx & white_mobility > 0;
+		new_state.white_check = new_state.bitboards.white_king & new_state.bitboards.black_mobility > 0;
+		new_state.black_check = new_state.bitboards.black_king & new_state.bitboards.white_mobility > 0;
 
 		let mut new_zobrist_hash = self.zobrist_hash.clone();
 		new_zobrist_hash.update_move(self, &mv);
@@ -442,50 +470,6 @@ impl GameState {
 		return new_state;
 	}
 }
-
-#[inline(never)]
-	pub fn get_check_states_lazy(game_state: &GameState) -> (bool, bool) {
-		let mut black_king_mask = 0u64;
-		let mut white_king_mask = 0u64;
-		let mut black_attacks_mask = 0u64;
-		let mut white_attacks_mask = 0u64;
-
-		let mut white_pieces_bitboard = game_state.bitboards.white_material;
-
-		while white_pieces_bitboard != 0 {
-			let piece_idx = white_pieces_bitboard.trailing_zeros() as usize;
-			let piece = game_state.board[piece_idx / 8][piece_idx % 8];
-			match piece.role {
-				Role::King => white_king_mask |= 1u64 << piece_idx,
-				Role::Queen => white_attacks_mask |= ALL_ROOK_MASKS[piece_idx] | ALL_BISHOP_MASKS[piece_idx],
-				Role::Rook => white_attacks_mask |= ALL_ROOK_MASKS[piece_idx],
-				Role::Bishop => white_attacks_mask |= ALL_BISHOP_MASKS[piece_idx],
-				Role::Knight => white_attacks_mask |= ALL_KNIGHT_MASKS[piece_idx],
-				Role::Pawn => white_attacks_mask |= ALL_WHITE_PAWN_MASKS[piece_idx],
-				_ => ()
-			}
-			white_pieces_bitboard ^= 1u64 << piece_idx;
-		}
-
-		let mut black_pieces_bitboard = game_state.bitboards.black_material;
-		while black_pieces_bitboard != 0 {
-			let piece_idx = black_pieces_bitboard.trailing_zeros() as usize;
-			let piece = game_state.board[piece_idx / 8][piece_idx % 8];
-			match piece.role {
-				Role::King => black_king_mask |= 1u64 << piece_idx,
-				Role::Queen => black_attacks_mask |= ALL_ROOK_MASKS[piece_idx] | ALL_BISHOP_MASKS[piece_idx],
-				Role::Rook => black_attacks_mask |= ALL_ROOK_MASKS[piece_idx],
-				Role::Bishop => black_attacks_mask |= ALL_BISHOP_MASKS[piece_idx],
-				Role::Knight => black_attacks_mask |= ALL_KNIGHT_MASKS[piece_idx],
-				Role::Pawn => black_attacks_mask |= ALL_BLACK_PAWN_MASKS[piece_idx],
-				_ => ()
-			}
-			black_pieces_bitboard ^= 1u64 << piece_idx;
-		}
-
-		(white_king_mask & black_attacks_mask != 0, black_king_mask & white_attacks_mask != 0)
-	}
-
 
 // Game is just a reference to a GameState, enabling branching
 #[derive(Clone)]
@@ -597,6 +581,22 @@ impl Game {
 					black_material: 0b00000000_00000000_00000000_00000000_00000000_00000000_11111111_11111111,
 					white_mobility: 0b00000000_00000000_11111111_11111111_00000000_00000000_00000000_00000000,
 					black_mobility: 0b00000000_00000000_00000000_00000000_11111111_11111111_00000000_00000000,
+					white_king: 0,
+					black_king: 0,
+					white_pawns: 0,
+					black_pawns: 0,
+					white_queen_moves: 0,
+					black_queen_moves: 0,
+					white_pawn_moves: 0,
+					black_pawn_moves: 0,
+					white_king_moves: 0,
+					black_king_moves: 0,
+					white_bishop_moves: 0,
+					black_bishop_moves: 0,
+					white_knight_moves: 0,
+					black_knight_moves: 0,
+					white_rook_moves: 0,
+					black_rook_moves: 0,
 				},
 				zobrist_hash: ZobristHash::new(),
 				move_count: 0,
@@ -894,8 +894,17 @@ fn get_all_moves(game: &GameState) -> Vec<Move> {
 	output
 }
 
-pub fn get_mobility_bitboard(game: &GameState, color_override: Option<Color>) -> u64 {
-	let mut mobility_bitboard = 0u64;
+pub fn populate_static_bitboards(game: &mut GameState, color_override: Option<Color>) -> () {
+	let mut queen_moves_bitboard = 0u64;
+	let mut pawn_moves_bitboard = 0u64;
+	let mut king_moves_bitboard = 0u64;
+	let mut bishop_moves_bitboard = 0u64;
+	let mut knight_moves_bitboard = 0u64;
+	let mut rook_moves_bitboard = 0u64;
+
+	let mut king_bitboard = 0u64;
+	let mut pawns_bitboard = 0u64;
+
 	let color = if color_override.is_some() { color_override.unwrap() } else { game.turn };
 	let mut pieces_bitboard = if color == Color::White { game.bitboards.white_material } else { game.bitboards.black_material };
 
@@ -904,25 +913,26 @@ pub fn get_mobility_bitboard(game: &GameState, color_override: Option<Color>) ->
 		let piece = game.board[idx_to_sq(piece_idx).0][idx_to_sq(piece_idx).1];
 			match piece.role {
 				Role::Queen => {
-					mobility_bitboard |= get_bishop_moves(piece_idx, game.bitboards.white_material | game.bitboards.black_material);
-					mobility_bitboard |= get_rook_moves(piece_idx, game.bitboards.white_material | game.bitboards.black_material);
+					queen_moves_bitboard |= get_bishop_moves(piece_idx, game.bitboards.white_material | game.bitboards.black_material);
+					queen_moves_bitboard |= get_rook_moves(piece_idx, game.bitboards.white_material | game.bitboards.black_material);
 				}
 				Role::King => {
-					mobility_bitboard |=  ALL_KING_MASKS[piece_idx];
+					king_bitboard |= 1u64 << piece_idx;
+					king_moves_bitboard |=  ALL_KING_MASKS[piece_idx];
 					match piece.color {
 						Color::White => {
 							if game.white_castle_left {
 								if [(7,1), (7,2), (7,3)]
 									.into_iter()
 									.all(|(x, y)| game.board[x][y].color == Color::Blank) {
-										mobility_bitboard |= 1u64 << (7 * 8 + 2);
+										king_moves_bitboard |= 1u64 << (7 * 8 + 2);
 									}
 							}
 							if game.white_castle_right {
 								if [(7,6), (7,5)]
 									.into_iter()
 									.all(|(x, y)| game.board[x][y].color == Color::Blank) {
-										mobility_bitboard |= 1u64 << (7 * 8 + 6);
+										king_moves_bitboard |= 1u64 << (7 * 8 + 6);
 									}
 							}
 						}
@@ -931,14 +941,14 @@ pub fn get_mobility_bitboard(game: &GameState, color_override: Option<Color>) ->
 								if [(0,1), (0,2), (0,3)]
 									.into_iter()
 									.all(|(x, y)| game.board[x][y].color == Color::Blank) {
-										mobility_bitboard |= 1u64 << 2;
+										king_moves_bitboard |= 1u64 << 2;
 									}
 							}
 							if game.black_castle_right {
 								if [(0,6), (0,5)]
 									.into_iter()
 									.all(|(x, y)| game.board[x][y].color == Color::Blank) {
-										mobility_bitboard |= 1u64 << 6;
+										king_moves_bitboard |= 1u64 << 6;
 									}
 							}
 						}
@@ -946,63 +956,64 @@ pub fn get_mobility_bitboard(game: &GameState, color_override: Option<Color>) ->
 					}
 				}
 				Role::Bishop => {
-					mobility_bitboard |= get_bishop_moves(piece_idx, game.bitboards.white_material | game.bitboards.black_material);
+					bishop_moves_bitboard |= get_bishop_moves(piece_idx, game.bitboards.white_material | game.bitboards.black_material);
 				}
 				Role::Knight => {
-					mobility_bitboard |=  ALL_KNIGHT_MASKS[piece_idx];
+					knight_moves_bitboard |=  ALL_KNIGHT_MASKS[piece_idx];
 				}
 				Role::Rook => {
-					mobility_bitboard |= get_rook_moves(piece_idx, game.bitboards.white_material | game.bitboards.black_material);
+					rook_moves_bitboard |= get_rook_moves(piece_idx, game.bitboards.white_material | game.bitboards.black_material);
 				}
 				// TODO: En passant
 				Role::Pawn => {
+					pawns_bitboard |= 1u64 << piece_idx;
 					match piece.color {
 						Color::White => {
 							if piece_idx / 8 > 0 && game.is_square_blank(&Square(piece_idx / 8 + 1, piece_idx % 8)) {
-								mobility_bitboard |= 1u64 << (piece_idx - 8);
+								pawn_moves_bitboard |= 1u64 << (piece_idx - 8);
 							}
 							if
 								piece_idx / 8 > 0 && piece_idx % 8 > 0
 								&& game.is_square_color(Square(piece_idx / 8 - 1, piece_idx % 8 - 1), Color::Black)
 							{
-								mobility_bitboard |= 1u64 << (piece_idx - 8 - 1);
+								pawn_moves_bitboard |= 1u64 << (piece_idx - 8 - 1);
 							}
 							if
 								piece_idx / 8 > 0 && piece_idx % 8 < 7
 								&& game.is_square_color(Square(piece_idx / 8 - 1, piece_idx % 8 + 1), Color::Black)
 							{
-								mobility_bitboard |= 1u64 << (piece_idx - 8 + 1);
+								pawn_moves_bitboard |= 1u64 << (piece_idx - 8 + 1);
 							}
 							if
 								piece_idx / 8 == 6
 								&& game.is_square_blank(&Square(piece_idx / 8 - 1, piece_idx % 8))
 								&& game.is_square_blank(&Square(piece_idx / 8 - 2, piece_idx % 8))
 							{
-								mobility_bitboard |= 1u64 << (piece_idx - (2 * 8));
+								pawn_moves_bitboard |= 1u64 << (piece_idx - (2 * 8));
 							}
 						}
 						Color::Black => {
 							if piece_idx / 8 < 7 && game.is_square_blank(&Square(piece_idx / 8 + 1, piece_idx % 8)) {
-								mobility_bitboard |= 1u64 << (piece_idx + 8);
+								pawn_moves_bitboard |= 1u64 << (piece_idx + 8);
 							}
 							if
 								piece_idx / 8 < 7 && piece_idx % 8 > 0
 								&& game.is_square_color(Square(piece_idx / 8 + 1, piece_idx % 8 - 1), Color::White)
 							{
-								mobility_bitboard |= 1u64 << (piece_idx + 8 - 1);
+								pawn_moves_bitboard |= 1u64 << (piece_idx + 8 - 1);
 							}
 							if
 								piece_idx / 8 < 7 && piece_idx % 8 < 7
 								&& game.is_square_color(Square(piece_idx / 8 + 1, piece_idx % 8 + 1), Color::White)
 							{
-								mobility_bitboard |= 1u64 << (piece_idx + 8 + 1);
+								pawn_moves_bitboard |= 1u64 << (piece_idx + 8 + 1);
 							}
 							if // Only allow two forward if on starting row
 								piece_idx / 8 == 1
 								&& game.is_square_blank(&Square(piece_idx / 8 + 1, piece_idx % 8))
 								&& game.is_square_blank(&Square(piece_idx / 8 + 2, piece_idx % 8))
 							{
-								mobility_bitboard |= 1u64 << (piece_idx + (2 * 8));
+								pawn_moves_bitboard |= 1u64 << (piece_idx + (2 * 8));
 							}
 						}
 						Color::Blank => ()
@@ -1012,7 +1023,40 @@ pub fn get_mobility_bitboard(game: &GameState, color_override: Option<Color>) ->
 			}
 		pieces_bitboard ^= 1u64 << piece_idx;
 	}
-	mobility_bitboard & if color == Color::White { !game.bitboards.white_material } else { !game.bitboards.black_material }
+
+	let mut mobility_bitboard = 0u64;
+	mobility_bitboard |= queen_moves_bitboard;
+	mobility_bitboard |= pawn_moves_bitboard;
+	mobility_bitboard |= king_moves_bitboard;
+	mobility_bitboard |= bishop_moves_bitboard;
+	mobility_bitboard |= knight_moves_bitboard;
+	mobility_bitboard |= rook_moves_bitboard;
+	
+	let material_mask = if color == Color::White { !game.bitboards.white_material } else { !game.bitboards.black_material };
+	let mobility = mobility_bitboard & material_mask;
+	
+	// Mutate bitboards directly
+	if color == Color::White {
+		game.bitboards.white_mobility = mobility;
+		game.bitboards.white_queen_moves = queen_moves_bitboard & material_mask;
+		game.bitboards.white_pawn_moves = pawn_moves_bitboard & material_mask;
+		game.bitboards.white_king_moves = king_moves_bitboard & material_mask;
+		game.bitboards.white_bishop_moves = bishop_moves_bitboard & material_mask;
+		game.bitboards.white_knight_moves = knight_moves_bitboard & material_mask;
+		game.bitboards.white_rook_moves = rook_moves_bitboard & material_mask;
+		game.bitboards.white_king = king_bitboard;
+		game.bitboards.white_pawns = pawns_bitboard;
+	} else {
+		game.bitboards.black_mobility = mobility;
+		game.bitboards.black_queen_moves = queen_moves_bitboard & material_mask;
+		game.bitboards.black_pawn_moves = pawn_moves_bitboard & material_mask;
+		game.bitboards.black_king_moves = king_moves_bitboard & material_mask;
+		game.bitboards.black_bishop_moves = bishop_moves_bitboard & material_mask;
+		game.bitboards.black_knight_moves = knight_moves_bitboard & material_mask;
+		game.bitboards.black_rook_moves = rook_moves_bitboard & material_mask;
+		game.bitboards.black_king = king_bitboard;
+		game.bitboards.black_pawns = pawns_bitboard;
+	}
 }
 
 #[inline(never)]
