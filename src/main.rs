@@ -79,13 +79,13 @@ fn adjust_bot(bot: bot::Bot, step_pct: f32) -> bot::Bot {
 // 1  = bot 1 win
 // -1 = bot 2 win
 // 0  = draw
-fn play_game_early_termination(game: &mut game::Game, bot1: &bot::Bot, bot2: &bot::Bot, eval_threshold: f32) -> i32 {
+fn play_game_early_termination(game: &mut game::Game, bot1: &bot::Bot, bot2: &bot::Bot, eval_threshold: f32, print: bool) -> i32 {
 	let mut transposition_table = transposition_tables::TranspositionTable::new();
 
-	println!("Starting game\n{:?}", game.state);
+	if print { println!("Starting game\n{:?}", game.state) }
 	loop {
 		if game.checkmate {
-			println!("Checkmate\n{:?}", game.state);
+			if print { println!("Checkmate\n{:?}", game.state) }
 			return -1;
 		}
 
@@ -93,19 +93,19 @@ fn play_game_early_termination(game: &mut game::Game, bot1: &bot::Bot, bot2: &bo
 		let (bot_move, score) = bot1.evaluate_position(game, &mut transposition_table);
 		if score < -eval_threshold {
 			// If after the best white move the eval is still below the threshold, assume black wins.
-			println!("White move below threshold\n{:?}", game.state);
+			if print { println!("White move below threshold\n{:?}", game.state) }
 			return -1;
 		}
 		if bot_move.0 == bot_move.1 {
-			println!("White move is a pass: {:?}\n{:?}", bot_move, game.state);
+			if print { println!("White move is a pass: {:?}\n{:?}", bot_move, game.state) }
 			return 0;
 		}
 
 		game.make_move(bot_move);
-		println!("White move: {:?}, Eval: {}\n{:?}", bot_move, score, game.state);
+		if print { println!("White move: {:?}, Eval: {}\n{:?}", bot_move, score, game.state) }
 
 		if game.checkmate {
-			println!("Checkmate\n{:?}", game.state);
+			if print { println!("Checkmate\n{:?}", game.state) }
 			return 1;
 		}
 
@@ -113,29 +113,28 @@ fn play_game_early_termination(game: &mut game::Game, bot1: &bot::Bot, bot2: &bo
 		let (bot_move, score) = bot2.evaluate_position(game, &mut transposition_table);
 		if score > eval_threshold {
 			// If after the best black move the eval is still above the threshold, assume white wins.
-			println!("Black move above threshold\n{:?}", game.state);
+			if print { println!("Black move above threshold\n{:?}", game.state) }
 			return 1;
 		}
 		if bot_move.0 == bot_move.1 {
-			println!("Black move is a pass: {:?}\n{:?}", bot_move, game.state);
+			if print { println!("Black move is a pass: {:?}\n{:?}", bot_move, game.state) }
 			return 0;
 		}
 
 		game.make_move(bot_move);
-		println!("Black move: {:?}, Eval: {}\n{:?}", bot_move, score, game.state);
+		if print { println!("Black move: {:?}, Eval: {}\n{:?}", bot_move, score, game.state) }
 
 		if bot2.check_for_repetition(&game) {
-			println!("Repetition\n{:?}", game.state);
+			if print { println!("Repetition\n{:?}", game.state) }
 			return 0;
 		}
 	}
 }
 
-fn run_training() -> () {
+fn run_training(max_depth: u32) -> () {
 	let mut game = game::Game::new();
 
 	let mut bots: Vec<(bot::Bot, i32)> = Vec::new();
-	let max_depth = 5;
 	let mobility_weight = 0.243;
 	let center_control_weight = 0.364;
 	let castle_bonus = 1.621;
@@ -183,13 +182,13 @@ fn run_training() -> () {
 				let mut game1 = game::Game::new();
 				let bot1 = bots_clone[i].0.clone();
 				let bot2 = bots_clone[j].0.clone();
-				let result1 = play_game_early_termination(&mut game1, &bot1, &bot2, 10.0);
+				let result1 = play_game_early_termination(&mut game1, &bot1, &bot2, 10.0, false);
 				
 				// Game 2: bot j vs bot i (swapped)
 				let mut game2 = game::Game::new();
 				let bot1_swap = bots_clone[i].0.clone();
 				let bot2_swap = bots_clone[j].0.clone();
-				let result2 = play_game_early_termination(&mut game2, &bot2_swap, &bot1_swap, 10.0);
+				let result2 = play_game_early_termination(&mut game2, &bot2_swap, &bot1_swap, 10.0, false);
 				
 				// Return score changes: (i_index, j_index, i_change, j_change)
 				(i, j, result1 - result2, result2 - result1)
@@ -222,16 +221,17 @@ fn run_training() -> () {
 
 fn main() -> () {
 	println!("\nWelcome to this Chess App. Rather than standard Chess format for moves, please enter moves as zero-indexed coordinates. For example, 01,22");
+	// run_training(5);
 
 	let max_depth = 7;
-	let mobility_weight = bot::DEFAULT_MOBILITY_WEIGHT;
-	let center_control_weight = bot::CENTER_CONTROL_WEIGHT;
-	let castle_bonus = bot::DEFAULT_CASTLE_BONUS;
-	let can_castle_bonus = bot::DEFAULT_CAN_CASTLE_BONUS;
-	let check_weight = 0.1;
-	let piece_weights = bot::DEFAULT_PIECE_WEIGHTS;
-	let attack_weights = bot::DEFAULT_ATTACK_WEIGHTS;
-	let pawn_advance_weights = bot::DEFAULT_PAWN_ADVANCE_WEIGHTS;
+	let mobility_weight = 0.137;
+	let center_control_weight = 0.377;
+	let castle_bonus = 1.556;
+	let can_castle_bonus = 1.157;
+	let check_weight = 0.956;
+	let piece_weights = [11.53544, 19.668903, 5.37966, 4.159992, 3.9006069, 0.91680914];
+	let attack_weights = [1.5150762, 4.646771, 2.007797, 1.8080766, 0.38787466, 0.88452005];
+	let pawn_advance_weights = [0.0, 0.0, 0.0, 0.11348749, 0.22835411, 0.47338364];
 	let bot1 = bot::Bot::new(
 		max_depth,
 		mobility_weight, 
@@ -265,5 +265,5 @@ fn main() -> () {
 	);
 
 	let mut game = game::Game::new();
-	play_game_early_termination(&mut game, &bot1, &bot2, 50.0);
+	play_game_early_termination(&mut game, &bot1, &bot2, 50.0, true);
 }

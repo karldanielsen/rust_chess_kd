@@ -14,8 +14,9 @@ struct TranspositionTableEntry {
 	hash: u64,
 	score: f32,
 	depth: usize,
+	best_move: game::Move,
 	entry_type: EntryType,
-	game_state: Rc<game::GameState>,  // Store full game state for collision resolution
+	// game_state: Rc<game::GameState>,  // Store full game state for collision resolution
 }
 
 pub struct TranspositionTable {
@@ -32,62 +33,42 @@ impl TranspositionTable {
 		let hash = game.state.zobrist_hash.hash;
 		let index = (hash % TRANSPOSITION_TABLE_SIZE as u64) as usize;
 		if let Some(entry) = &self.table[index] {
-			// First check hash (fast), then verify with full state comparison
 			if entry.hash == hash {
-				if entry.game_state.as_ref() == game.state.as_ref() {
-					return Some(entry.score);
-				}
-				else {
-					println!("Yep! That's a nasty collision!")
-					return None;
-				}
+				return Some(entry.score);
 			}
 			return None;
 		}
 		None
 	}
 
-	pub fn get_depth(&self, game: &game::Game, depth: usize) -> Option<(f32, EntryType)> {
+	pub fn get_depth(&self, game: &game::Game, depth: usize) -> Option<(f32, EntryType, usize, game::Move)> {
 		let hash = game.state.zobrist_hash.hash;
 		let index = (hash % TRANSPOSITION_TABLE_SIZE as u64) as usize;
 		if let Some(entry) = &self.table[index] {
-			if entry.hash == hash && entry.depth >= depth {
-                if entry.game_state.as_ref() == game.state.as_ref() {
-					return Some(entry.score);
-				}
-				else {
-					println!("Yep! That's a nasty collision!")
-					return None;
-				}
+			if entry.hash == hash && entry.depth <= depth {
+				return Some((entry.score, entry.entry_type, entry.depth, entry.best_move));
 			}
             return None;  // Hash collision or different position
 		}
 		None
 	}
 
-	pub fn get_depth(&self, game: &game::Game, depth: usize) -> Option<(f32, EntryType)> {
+	pub fn set(&mut self, game: &game::Game, score: f32, depth: usize, entry_type: EntryType, best_move: game::Move) {
 		let hash = game.state.zobrist_hash.hash;
 		let index = (hash % TRANSPOSITION_TABLE_SIZE as u64) as usize;
-		if let Some(entry) = &self.table[index] {
-			if entry.hash == hash && entry.depth >= depth && entry.game_state.as_ref() == game.state.as_ref() {
-                return Some((entry.score, entry.entry_type));
-			}
-            return None;
+
+		// Early return if we already have an entry at this depth or better.
+		if let Some(_) = self.get_depth(game, depth) {
+			return;
 		}
-		None
-	}
 
-	pub fn set(&mut self, game: &game::Game, score: f32, depth: usize, entry_type: EntryType) {
-		let hash = game.state.zobrist_hash.hash;
-		let index = (hash % TRANSPOSITION_TABLE_SIZE as u64) as usize;
-
-		// TODO: Maybe don't evict entries with a higher depth?
 		self.table[index] = Some(TranspositionTableEntry {
 			hash,
 			score,
 			depth,
 			entry_type,
-			game_state: Rc::clone(&game.state),  // Clone the Rc (cheap, just increments ref count)
+			best_move,
+			// game_state: Rc::clone(&game.state),  // Clone the Rc (cheap, just increments ref count)
 		});
 	}
 }

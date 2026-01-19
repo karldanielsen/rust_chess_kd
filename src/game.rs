@@ -11,8 +11,65 @@ use crate::magic_tables::get_rook_moves;
 use crate::constants::{TRANSPOSITION_TABLE_SIZE, ALL_KNIGHT_MASKS, ALL_KING_MASKS, ALL_ROOK_MASKS, ALL_BISHOP_MASKS, ALL_BLACK_PAWN_MASKS, ALL_WHITE_PAWN_MASKS, format_mask};
 
 fn generate_zobrist_number() -> u64 {
+	const MAX_ATTEMPTS: usize = 1000;
 	let mut rng = rand::rng();
-	rng.random_range(0..u64::MAX as u64)
+	
+	for _attempt in 0..MAX_ATTEMPTS {
+		let num = rng.random_range(0..u64::MAX as u64);
+		
+		// Validate single number properties
+		if num == 0 {
+			continue; // Zero is invalid
+		}
+		
+		let ones = num.count_ones();
+		// Reject numbers that are too sparse (< 10 ones) or too dense (> 54 ones)
+		if ones < 10 || ones > 54 {
+			continue;
+		}
+		
+		return num;
+	}
+	
+	panic!("Failed to generate valid Zobrist number after {} attempts", MAX_ATTEMPTS);
+}
+
+fn validate_zobrist_numbers(numbers: &[u64; 773]) -> bool {
+	use std::collections::HashSet;
+	
+	// Check for duplicates
+	let mut seen = HashSet::new();
+	for &num in numbers.iter() {
+		if !seen.insert(num) {
+			return false; // Duplicate found
+		}
+	}
+	
+	// Check average bit density - should be around 20-30 ones per number
+	let mut total_ones = 0u32;
+	for &num in numbers.iter() {
+		total_ones += num.count_ones();
+	}
+	let avg_ones = total_ones as f32 / numbers.len() as f32;
+	if avg_ones < 15.0 || avg_ones > 35.0 {
+		return false;
+	}
+	
+	// Check for problematic XOR relationships that could cause collisions
+	// If a ^ b = c where all three are in the set, that's a potential issue
+	for i in 0..numbers.len().min(100) { // Sample first 100 to avoid O(n^3)
+		for j in (i + 1)..numbers.len().min(100) {
+			let xor_result = numbers[i] ^ numbers[j];
+			// Check if XOR result equals any other number (except the two we XORed)
+			for k in 0..numbers.len() {
+				if k != i && k != j && numbers[k] == xor_result {
+					return false;
+				}
+			}
+		}
+	}
+	
+	true
 }
 
 fn role_to_zobrist_index(role: Role, color: Color, square: Square) -> usize {
@@ -34,11 +91,21 @@ fn role_to_zobrist_index(role: Role, color: Color, square: Square) -> usize {
 }
 
 static ZOBRIST_NUMBERS: Lazy<[u64; 773]> = Lazy::new(|| {
-	let mut numbers = [0u64; 773];
-	for i in 0..773 {
-		numbers[i] = generate_zobrist_number();
+	const MAX_ATTEMPTS: usize = 100;
+	
+	for _attempt in 0..MAX_ATTEMPTS {
+		let mut numbers = [0u64; 773];
+		for i in 0..773 {
+			numbers[i] = generate_zobrist_number();
+		}
+		
+		if validate_zobrist_numbers(&numbers) {
+			return numbers;
+		}
 	}
-	numbers
+	
+	// If we couldn't generate good numbers after MAX_ATTEMPTS, panic
+	panic!("Failed to generate valid Zobrist numbers after {} attempts", MAX_ATTEMPTS);
 });
 
 #[derive(Clone)]
@@ -371,7 +438,7 @@ impl GameState {
 		}
 
 		// If the move was a castle, also move the rook to the new square
-		if Move::is_castle(mv) {
+		if Move::is_castle(&mv) && self.board[from.0][from.1].role == Role::King {
 			if mv.1 == Square(7, 2) {
 				new_board[7][3] = new_board[7][0];
 				new_board[7][0] = Piece { role: Role::Blank, color: Color::Blank };

@@ -1,7 +1,10 @@
 use crate::game;
 use crate::transposition_tables::{TranspositionTable, EntryType};
+use crate::constants;
 use std::cmp::Ordering;
 use std::fmt;
+use once_cell::unsync::OnceCell;
+
 
 #[derive(Clone)]
 pub struct Bot {
@@ -74,33 +77,8 @@ pub const DEFAULT_PIECE_WEIGHTS: [f32; 6] = [8.0, 15.0, 5.0, 3.1, 2.9, 1.0];
 pub const DEFAULT_ATTACK_WEIGHTS: [f32; 6] = [4.0, 4.0, 2.5, 1.5, 1.5, 0.5];
 pub const DEFAULT_PAWN_ADVANCE_WEIGHTS: [f32; 6] = [0.0, 0.0, 0.0, 0.1, 0.3, 0.5];
 
-pub fn default_piece_weight(role: game::Role) -> f32 {
-	match role {
-		game::Role::Pawn => 1.0,
-		game::Role::Bishop => 3.1,
-		game::Role::Knight => 2.9,
-		game::Role::King => 15.0,
-		game::Role::Queen => 8.0,
-		game::Role::Rook => 5.0,
-		game::Role::Blank => 0.0,
-	}
-}
-
-pub fn default_attack_weight(role: game::Role) -> f32 {
-	match role {
-		game::Role::Pawn => 0.5,
-		game::Role::Bishop => 1.0,
-		game::Role::Knight => 1.0,
-		game::Role::King => 2.5, // Check weight adds to this
-		game::Role::Queen => 2.0,
-		game::Role::Rook => 1.5,
-		game::Role::Blank => 0.0,
-	}
-}
-
 // TODO:
-// - Fix the Lobotomization caused by TT tables
-// - Iterative Deepening :)
+// - Iterative Deepening
 // - Aggregate a list of "acceptable" moves the calling fn can pick from
 // - Add Static Exchange Evaluation
 // - Add Quiescence Search
@@ -108,12 +86,24 @@ pub fn default_attack_weight(role: game::Role) -> f32 {
 // - Most likely we just need boring old game state simplification and move calculation optimization.
 //   - Make game state static, and store a history of reversible moves (move + check states + maybe piece taken)
 
+
+const TRANSPOSITION_TABLE_DEPTH: u32 = 2;
 impl Bot {
 	pub fn evaluate_position(&self, game: &mut game::Game, transposition_table: &mut TranspositionTable) -> (game::Move, f32) {
 		self.minimax_eval(game, 0, f32::MIN, f32::MAX, transposition_table)
 	}
 
 	pub fn minimax_eval(&self, game: &mut game::Game, depth: u32, mut floor: f32, mut ceil: f32, transposition_table: &mut TranspositionTable) -> (game::Move, f32) {
+		if depth < TRANSPOSITION_TABLE_DEPTH {
+			if let Some((score, entry_type, stored_depth, best_move)) = transposition_table.get_depth(game, depth as usize) {
+				match entry_type {
+					EntryType::Exact => return (best_move, score),
+					EntryType::Lowerbound => floor = score,
+					EntryType::Upperbound => ceil = score,
+				}
+			}
+		}
+
 		let original_floor = floor;
 		let original_ceil = ceil;
 		
@@ -141,11 +131,17 @@ impl Bot {
 				let capture_score = if is_capture {
 					let to_piece = game.board[mv.1.0][mv.1.1];
 					let from_piece = game.board[mv.0.0][mv.0.1];
-					let to_piece_value = default_piece_weight(to_piece.role);
-					let from_piece_value = default_piece_weight(from_piece.role);
-					to_piece_value * 20.0 - from_piece_value
+					if to_piece.role == game::Role::Blank {
+						0.0
+					 } else {
+						let to_piece_value = self.piece_weights[to_piece.role as usize];
+						let from_piece_value = self.piece_weights[from_piece.role as usize];
+						to_piece_value * 20.0 - from_piece_value
+					}
 				} else { 0.0 };
 				game.make_move(mv);
+
+				// TODO: Maybe only do this when entry type is exact?
 				let score = transposition_table.get(game);
 				game.reverse();
 				(idx, score, capture_score)
@@ -154,7 +150,11 @@ impl Bot {
 			moves_with_scores.sort_unstable_by(|(_, a_score, a_capture_score), (_, b_score, b_capture_score)| {
 				// // If move involves a capture, sort by MVV - LVA score
 				if *a_capture_score > 0.0 || *b_capture_score > 0.0 {
-					return a_capture_score.partial_cmp(b_capture_score).unwrap_or(Ordering::Equal);
+					if is_white_turn {
+						return b_capture_score.partial_cmp(a_capture_score).unwrap_or(Ordering::Equal);
+					} else {
+						return a_capture_score.partial_cmp(b_capture_score).unwrap_or(Ordering::Equal);
+					}
 				}
 
 				// Else, sort by previous evaluation
@@ -178,7 +178,7 @@ impl Bot {
 				}
 			});
 
-			moves_with_scores.into_iter().map(|(idx, _, _)| idx).collect()
+			moves_with_scores.into_iter().map(|(idx, _, capture_score)| idx).collect()
 		} else {
 			(0..move_count).collect()
 		};
@@ -220,62 +220,13 @@ impl Bot {
 			let score = if self.check_for_repetition(game) {
 				0.0
 			} else if depth == 0 {
-				let tt_entry = transposition_table.get_depth(game, (self.max_depth - depth - 1) as usize);
-				if let Some((tp_score, tp_entry_type)) = tt_entry {
-					match tp_entry_type {
-						EntryType::Exact => tp_score,
-						EntryType::Lowerbound => {
-							floor = f32::max(floor, tp_score);
-							let (_, base_score) = self.minimax_eval(game, depth + 1, floor, ceil, transposition_table);
-							base_score + self.do_castle_bonus(game, &mv)
-						},
-						EntryType::Upperbound => {
-							ceil = f32::min(ceil, tp_score);
-							let (_, base_score) = self.minimax_eval(game, depth + 1, floor, ceil, transposition_table);
-							base_score + self.do_castle_bonus(game, &mv)
-						},
-					}
-				} else {
-					let (_, base_score) = self.minimax_eval(game, depth + 1, floor, ceil, transposition_table);
-					base_score + self.do_castle_bonus(game, &mv)
-				}
+				let (_, base_score) = self.minimax_eval(game, depth + 1, floor, ceil, transposition_table);
+				base_score + self.do_castle_bonus(game, &mv)
 			} else if depth < self.max_depth - 1 {
-				let tt_entry = transposition_table.get_depth(game, (self.max_depth - depth - 1) as usize);
-				if let Some((tp_score, tp_entry_type)) = tt_entry {
-					match tp_entry_type {
-						EntryType::Exact => tp_score,
-						EntryType::Lowerbound => {
-							floor = f32::max(floor, tp_score);
-							let (_, score) = self.minimax_eval(game, depth + 1, floor, ceil, transposition_table);
-							score
-						},
-						EntryType::Upperbound => {
-							ceil = f32::min(ceil, tp_score);
-							let (_, score) = self.minimax_eval(game, depth + 1, floor, ceil, transposition_table);
-							score
-						},
-					}
-				} else {
-					let (_, score) = self.minimax_eval(game, depth + 1, floor, ceil, transposition_table);
-					score
-				}
+				let (_, score) = self.minimax_eval(game, depth + 1, floor, ceil, transposition_table);
+				score
 			} else { // At max depth, evaluate the position.
-				let tt_entry = transposition_table.get_depth(game, 0);
-				if let Some((tp_score, tp_entry_type)) = tt_entry {
-					match tp_entry_type {
-						EntryType::Exact => tp_score,
-						EntryType::Lowerbound => {
-							floor = f32::max(floor, tp_score);
-							self.eval(&game.state)
-						},
-						EntryType::Upperbound => {
-							ceil = f32::min(ceil, tp_score);
-							self.eval(&game.state)
-						},
-					}
-				} else {
-					self.eval(&game.state)
-				}
+				self.eval(&game.state)			
 			};
 
 			game.reverse(); 
@@ -320,7 +271,10 @@ impl Bot {
 			return (best_move, 0.0);
 		}
 
-		transposition_table.set(game, best_score, (self.max_depth - depth) as usize, tp_table_entry_type);
+		// Only bother with trans
+		if depth < TRANSPOSITION_TABLE_DEPTH {
+			transposition_table.set(game, best_score, depth as usize, EntryType::Exact, best_move);
+		}
 
 		return (best_move, best_score);
 	}
@@ -397,9 +351,8 @@ impl Bot {
 		while pieces_bitboard != 0 {
 			let piece_idx = pieces_bitboard.trailing_zeros() as usize;
 			let piece = game_state.board[piece_idx / 8][piece_idx % 8];
-			if piece.color == color && piece.role != game::Role::Blank {
-				score += self.piece_weights[piece.role as usize];
-			}
+
+			score += self.piece_weights[piece.role as usize];
 			pieces_bitboard ^= 1u64 << piece_idx;
 		}
 		score
@@ -407,7 +360,7 @@ impl Bot {
 
 	// TODO: Not weighted per-piece
 	fn attack_score(&self, game_state: &game::GameState, color: game::Color) -> f32 {
-		self.attack_weights[0] * if color == game::Color::White {
+		self.attack_weights[0] * if color == game::Color::Black {
 			(game_state.bitboards.white_material & game_state.bitboards.black_mobility).count_ones() as f32
 		} else {
 			(game_state.bitboards.black_material & game_state.bitboards.white_mobility).count_ones() as f32
@@ -583,18 +536,17 @@ mod tests {
 			white_check: false,
 			black_check: false,
 			checkmate: false,
-			move_list: OnceCell::new(), // Max possible moves in chess
+			move_list: OnceCell::new(),
 			parent: None,
 			since_last_non_reversible_move: 0,
 			move_count: 0,
 			zobrist_hash: game::ZobristHash::new(),
 		};
 		starting_game_state.bitboards = game::Bitboards::from(&starting_game_state);
-		starting_game_state.move_list = Some(game::get_all_valid_moves_fast(&starting_game_state, Some(game::Color::Black)));
 
 		let mut game = game::Game::from(starting_game_state);
 		let mut bot = Bot::new(3, 0.1, CENTER_CONTROL_WEIGHT, 5.0, 2.0, DEFAULT_PIECE_WEIGHTS, DEFAULT_ATTACK_WEIGHTS, 0.5, DEFAULT_PAWN_ADVANCE_WEIGHTS);
-		let (mv, score) = bot.evaluate_position(&mut game, &mut [TranspositionTable::new(), TranspositionTable::new()]);
+		let (mv, score) = bot.evaluate_position(&mut game, &mut TranspositionTable::new());
 		assert_eq!(mv, game::Move(game::Square(1, 3), game::Square(5, 7)));
 		assert_eq!(score, -100000.0);
 	}
