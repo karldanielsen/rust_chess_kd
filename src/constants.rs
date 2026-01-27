@@ -1,6 +1,6 @@
 use rand::Rng;
 
-pub const TRANSPOSITION_TABLE_SIZE: usize = 8192;
+pub const TRANSPOSITION_TABLE_SIZE: usize = 16384;
 
 pub fn format_mask(mask: u64) -> String {
     let mut s = String::from("\n");

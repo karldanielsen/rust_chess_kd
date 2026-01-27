@@ -8,6 +8,7 @@ use std::time::Instant;
 use std::error::Error;
 use std::io;
 use std::array;
+use std::cell::RefCell;
 use rand::Rng;
 use rayon::prelude::*;
 
@@ -60,12 +61,11 @@ fn adjust_bot(bot: bot::Bot, step_pct: f32) -> bot::Bot {
 	new_bot.piece_weights[3] *= 1.0 + (rng.random_range(-1..=1) as f32 * step_pct / 100.0);
 	new_bot.piece_weights[4] *= 1.0 + (rng.random_range(-1..=1) as f32 * step_pct / 100.0);
 	new_bot.piece_weights[5] *= 1.0 + (rng.random_range(-1..=1) as f32 * step_pct / 100.0);
-	new_bot.attack_weights[0] *= 1.0 + (rng.random_range(-1..=1) as f32 * step_pct / 100.0);
-	new_bot.attack_weights[1] *= 1.0 + (rng.random_range(-1..=1) as f32 * step_pct / 100.0);
-	new_bot.attack_weights[2] *= 1.0 + (rng.random_range(-1..=1) as f32 * step_pct / 100.0);
-	new_bot.attack_weights[3] *= 1.0 + (rng.random_range(-1..=1) as f32 * step_pct / 100.0);
-	new_bot.attack_weights[4] *= 1.0 + (rng.random_range(-1..=1) as f32 * step_pct / 100.0);
-	new_bot.attack_weights[5] *= 1.0 + (rng.random_range(-1..=1) as f32 * step_pct / 100.0);
+	for attacking_piece in 0..6 {
+		for attacked_piece in 0..6 {
+			new_bot.attack_weights[attacking_piece][attacked_piece] *= 1.0 + (rng.random_range(-1..=1) as f32 * step_pct / 100.0);
+		}
+	}
 	new_bot.check_weight *= 1.0 + (rng.random_range(-1..=1) as f32 * step_pct / 100.0);
 	new_bot.pawn_advance_weights[0] *= 1.0 + (rng.random_range(-1..=1) as f32 * step_pct / 100.0);
 	new_bot.pawn_advance_weights[1] *= 1.0 + (rng.random_range(-1..=1) as f32 * step_pct / 100.0);
@@ -76,12 +76,30 @@ fn adjust_bot(bot: bot::Bot, step_pct: f32) -> bot::Bot {
 	new_bot
 }
 
+// Thread-local storage for transposition tables (one per rayon thread)
+thread_local! {
+	static TP_TABLE: RefCell<transposition_tables::TranspositionTable> = RefCell::new(transposition_tables::TranspositionTable::new());
+}
+
 // 1  = bot 1 win
 // -1 = bot 2 win
 // 0  = draw
-fn play_game_early_termination(game: &mut game::Game, bot1: &bot::Bot, bot2: &bot::Bot, eval_threshold: f32, print: bool) -> i32 {
-	let mut transposition_table = transposition_tables::TranspositionTable::new();
+fn play_game_early_termination(game: &mut game::Game, bot1: &bot::Bot, bot2: &bot::Bot, eval_threshold: f32, use_thread_local: bool, print: bool) -> i32 {
+	if use_thread_local {
+		// Use thread-local table, cleared before each game to avoid stale cache entries
+		TP_TABLE.with(|tp| {
+			tp.borrow_mut().clear();
+			let mut transposition_table = tp.borrow_mut();
+			play_game_loop(game, bot1, bot2, eval_threshold, &mut *transposition_table, print)
+		})
+	} else {
+		// Create a new table for this game
+		let mut transposition_table = transposition_tables::TranspositionTable::new();
+		play_game_loop(game, bot1, bot2, eval_threshold, &mut transposition_table, print)
+	}
+}
 
+fn play_game_loop(game: &mut game::Game, bot1: &bot::Bot, bot2: &bot::Bot, eval_threshold: f32, transposition_table: &mut transposition_tables::TranspositionTable, print: bool) -> i32 {
 	if print { println!("Starting game\n{:?}", game.state) }
 	loop {
 		if game.checkmate {
@@ -90,7 +108,7 @@ fn play_game_early_termination(game: &mut game::Game, bot1: &bot::Bot, bot2: &bo
 		}
 
 		// White Move
-		let (bot_move, score) = bot1.evaluate_position(game, &mut transposition_table);
+		let (bot_move, score) = bot1.evaluate_position_with_time_limit(game, transposition_table, 10);
 		if score < -eval_threshold {
 			// If after the best white move the eval is still below the threshold, assume black wins.
 			if print { println!("White move below threshold\n{:?}", game.state) }
@@ -110,7 +128,7 @@ fn play_game_early_termination(game: &mut game::Game, bot1: &bot::Bot, bot2: &bo
 		}
 
 		// Black Move
-		let (bot_move, score) = bot2.evaluate_position(game, &mut transposition_table);
+		let (bot_move, score) = bot2.evaluate_position_with_time_limit(game, transposition_table, 10);
 		if score > eval_threshold {
 			// If after the best black move the eval is still above the threshold, assume white wins.
 			if print { println!("Black move above threshold\n{:?}", game.state) }
@@ -135,14 +153,14 @@ fn run_training(max_depth: u32) -> () {
 	let mut game = game::Game::new();
 
 	let mut bots: Vec<(bot::Bot, i32)> = Vec::new();
-	let mobility_weight = 0.243;
-	let center_control_weight = 0.364;
-	let castle_bonus = 1.621;
+    let mobility_weight = 0.194;
+	let center_control_weight = 0.291;
+	let castle_bonus = 1.556;
 	let can_castle_bonus = 1.116;
-	let check_weight = 0.797;
-	let piece_weights = [8.73897, 14.900683, 3.3962498, 3.2828217, 3.762159, 0.88426805];
-	let attack_weights = [1.7934139, 4.4003506, 2.904799, 1.7121936, 0.67339355, 0.88452005];
-	let pawn_advance_weights = [0.0, 0.0, 0.0, 0.07164613, 0.17299554, 0.6574773];
+	let check_weight = 0.956;
+	let piece_weights = [8.73897, 14.304657, 2.7169998, 3.9393861, 3.6116729, 1.0611217];
+	let attack_weights = [[1.7216774, 3.5202806, 1.8590714, 2.0546324, 0.6464578, 0.88452005], [1.4347311, 4.4003506, 2.7886071, 1.643706, 0.5387148, 0.84913933], [3.485759, 3.485759, 2.3238392, 2.0546324, 0.6464578, 1.273709], [1.3697549, 1.643706, 1.3697549, 1.3697549, 0.43097186, 0.70761603], [0.43097186, 0.6464578, 0.43097186, 0.43097186, 0.5387148, 0.84913933], [0.88452005, 0.88452005, 0.56609285, 0.88452005, 0.84913933, 1.0614241]];
+	let pawn_advance_weights = [0.0, 0.0, 0.0, 0.057316907, 0.24911359, 0.7889728];
 	let base_bot = bot::Bot::new(
 		max_depth,
 		mobility_weight, 
@@ -156,7 +174,9 @@ fn run_training(max_depth: u32) -> () {
 	);
 
 	let mut step_size = 20.0;
-	bots.push((adjust_bot(base_bot.clone(), step_size), 0));
+	let mut bot2 = base_bot.clone();
+	bot2.piece_weights[2] = 6.0;
+	bots.push((bot2, 0));
 	bots.push((adjust_bot(base_bot.clone(), step_size), 0));
 	bots.push((adjust_bot(base_bot.clone(), step_size), 0));
 	bots.push((adjust_bot(base_bot.clone(), step_size), 0));
@@ -182,13 +202,13 @@ fn run_training(max_depth: u32) -> () {
 				let mut game1 = game::Game::new();
 				let bot1 = bots_clone[i].0.clone();
 				let bot2 = bots_clone[j].0.clone();
-				let result1 = play_game_early_termination(&mut game1, &bot1, &bot2, 10.0, false);
+				let result1 = play_game_early_termination(&mut game1, &bot1, &bot2, 10.0, true, false);
 				
 				// Game 2: bot j vs bot i (swapped)
 				let mut game2 = game::Game::new();
 				let bot1_swap = bots_clone[i].0.clone();
 				let bot2_swap = bots_clone[j].0.clone();
-				let result2 = play_game_early_termination(&mut game2, &bot2_swap, &bot1_swap, 10.0, false);
+				let result2 = play_game_early_termination(&mut game2, &bot2_swap, &bot1_swap, 10.0, true, false);
 				
 				// Return score changes: (i_index, j_index, i_change, j_change)
 				(i, j, result1 - result2, result2 - result1)
@@ -203,7 +223,7 @@ fn run_training(max_depth: u32) -> () {
 		bots.sort_by(|a, b| b.1.cmp(&a.1));
 		
 		// In future this should wait for a stable state before reducing step size
-		if iterations % 20 == 0 {
+		if iterations % 5 == 0 {
 			step_size = f32::max(2.0, step_size / 2.0);
 		}
 
@@ -221,7 +241,7 @@ fn run_training(max_depth: u32) -> () {
 
 fn main() -> () {
 	println!("\nWelcome to this Chess App. Rather than standard Chess format for moves, please enter moves as zero-indexed coordinates. For example, 01,22");
-	// run_training(5);
+	// run_training(4);
 
 	let max_depth = 7;
 	let mobility_weight = 0.137;
@@ -230,9 +250,16 @@ fn main() -> () {
 	let can_castle_bonus = 1.157;
 	let check_weight = 0.956;
 	let piece_weights = [11.53544, 19.668903, 5.37966, 4.159992, 3.9006069, 0.91680914];
-	let attack_weights = [1.5150762, 4.646771, 2.007797, 1.8080766, 0.38787466, 0.88452005];
+	let attack_weights = [
+		[1.5150762, 4.646771, 2.007797, 1.8080766, 0.38787466, 0.88452005],
+		[1.5150762, 4.646771, 2.007797, 1.8080766, 0.38787466, 0.88452005],
+		[2.007797, 2.007797, 2.007797, 1.8080766, 0.38787466, 0.88452005],
+		[1.8080766, 1.8080766, 1.8080766, 1.8080766, 0.38787466, 0.88452005],
+		[0.38787466, 0.38787466, 0.38787466, 0.38787466, 0.38787466, 0.88452005],
+		[0.88452005, 0.88452005, 0.88452005, 0.88452005, 0.88452005, 0.88452005],
+	];
 	let pawn_advance_weights = [0.0, 0.0, 0.0, 0.11348749, 0.22835411, 0.47338364];
-	let bot1 = bot::Bot::new(
+	let mut bot1 = bot::Bot::new(
 		max_depth,
 		mobility_weight, 
 		center_control_weight, 
@@ -250,9 +277,16 @@ fn main() -> () {
 	let can_castle_bonus2 = 0.893;
 	let check_weight2 = 0.797;
 	let piece_weights2 = [6.991176, 11.920547, 4.0755, 3.9393861, 3.0097272, 0.88426805];
-	let attack_weights2 = [1.7934139, 5.280421, 2.3238392, 1.7121936, 0.67339355, 1.0614241];
+	let attack_weights2 = [
+		[1.7934139, 5.280421, 2.3238392, 1.7121936, 0.67339355, 1.0614241],
+		[1.7934139, 5.280421, 2.3238392, 1.7121936, 0.67339355, 1.0614241],
+		[2.3238392, 2.3238392, 2.3238392, 1.7121936, 0.67339355, 1.0614241],
+		[1.7121936, 1.7121936, 1.7121936, 1.7121936, 0.67339355, 1.0614241],
+		[0.67339355, 0.67339355, 0.67339355, 0.67339355, 0.67339355, 1.0614241],
+		[1.0614241, 1.0614241, 1.0614241, 1.0614241, 1.0614241, 1.0614241],
+	];
 	let pawn_advance_weights2 = [0.0, 0.0, 0.0, 0.085975364, 0.17299554, 0.52598184];
-	let bot2 = bot::Bot::new(
+	let mut bot2 = bot::Bot::new(
 		max_depth,
 		mobility_weight2, 
 		center_control_weight2, 
@@ -265,5 +299,5 @@ fn main() -> () {
 	);
 
 	let mut game = game::Game::new();
-	play_game_early_termination(&mut game, &bot1, &bot2, 50.0, true);
+	play_game_early_termination(&mut game, &mut bot1, &mut bot2, 25.0, false, true);
 }

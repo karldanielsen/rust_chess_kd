@@ -1,6 +1,5 @@
 use std::fmt;
 use std::ops::Deref;
-use std::rc::Rc;
 use rand::Rng;
 use colored::Colorize;
 use once_cell::sync::Lazy;
@@ -156,11 +155,32 @@ impl ZobristHash {
 		let from_idx = role_to_zobrist_index(piece.role, piece.color, from);
 		let to_idx = role_to_zobrist_index(piece.role, piece.color, to);
 
+		// XOR out piece from source square, XOR in piece at destination square
 		self.hash ^= ZOBRIST_NUMBERS[from_idx];
 		self.hash ^= ZOBRIST_NUMBERS[to_idx];
+		
+		// If capturing, XOR out captured piece
 		if target_piece.color != Color::Blank {
 			let attacked_piece_idx = role_to_zobrist_index(target_piece.role, target_piece.color, to);
 			self.hash ^= ZOBRIST_NUMBERS[attacked_piece_idx];
+		}
+		
+		// Handle castling: rook also moves
+		if Move::is_castle(mv) && piece.role == Role::King {
+			let (rook_from, rook_to) = match (piece.color, to) {
+				(Color::White, Square(7, 2)) => (Square(7, 0), Square(7, 3)),
+				(Color::White, Square(7, 6)) => (Square(7, 7), Square(7, 5)),
+				(Color::Black, Square(0, 2)) => (Square(0, 0), Square(0, 3)),
+				(Color::Black, Square(0, 6)) => (Square(0, 7), Square(0, 5)),
+				_ => panic!("Not a valid castle: {:?}", mv), // Not a valid castle
+			};
+			let rook = game_state.board[rook_from.0][rook_from.1];
+			if rook.role == Role::Rook && rook.color == piece.color {
+				let rook_from_idx = role_to_zobrist_index(rook.role, rook.color, rook_from);
+				let rook_to_idx = role_to_zobrist_index(rook.role, rook.color, rook_to);
+				self.hash ^= ZOBRIST_NUMBERS[rook_from_idx];
+				self.hash ^= ZOBRIST_NUMBERS[rook_to_idx];
+			}
 		}
 	}
 
@@ -379,9 +399,9 @@ pub struct GameState {
 	pub bitboards: Bitboards,
 	pub zobrist_hash: ZobristHash,
 
-	// Used for branching and backtracking
+	// Used for backtracking (simple linked list, no branching)
 	pub move_count: usize,
-	pub parent: Option<Rc<GameState>>,
+	pub parent: Option<Box<GameState>>,
 	pub since_last_non_reversible_move: usize,
 }
 
@@ -442,19 +462,19 @@ impl GameState {
 			if mv.1 == Square(7, 2) {
 				new_board[7][3] = new_board[7][0];
 				new_board[7][0] = Piece { role: Role::Blank, color: Color::Blank };
-				new_bitboards.black_material ^= (1u64 << (7 * 8 + 3)) | (1u64 << (7 * 8));
+				new_bitboards.white_material ^= (1u64 << (7 * 8 + 3)) | (1u64 << (7 * 8));
 			} else if mv.1 == Square(7, 6) {
 				new_board[7][5] = new_board[7][7];
 				new_board[7][7] = Piece { role: Role::Blank, color: Color::Blank };
-				new_bitboards.black_material ^= (1u64 << (7 * 8 + 5)) | (1u64 << (7 * 8 + 7));
+				new_bitboards.white_material ^= (1u64 << (7 * 8 + 5)) | (1u64 << (7 * 8 + 7));
 			} else if mv.1 == Square(0, 2) {
 				new_board[0][3] = new_board[0][0];
 				new_board[0][0] = Piece { role: Role::Blank, color: Color::Blank };
-				new_bitboards.white_material ^= (1u64 << (0 * 8 + 3)) | (1u64 << (0 * 8));
+				new_bitboards.black_material ^= (1u64 << (0 * 8 + 3)) | (1u64 << (0 * 8));
 			} else if mv.1 == Square(0, 6) {
 				new_board[0][5] = new_board[0][7];
 				new_board[0][7] = Piece { role: Role::Blank, color: Color::Blank };
-				new_bitboards.white_material ^= (1u64 << 5) | (1u64 << 7);
+				new_bitboards.black_material ^= (1u64 << 5) | (1u64 << 7);
 			}
 		}
 
@@ -482,9 +502,7 @@ impl GameState {
 			false
 		};
 
-		// Create new state with parent pointing to current state
-		// This allows branching: multiple games can share the same parent state
-		// Rc::clone() just increments the reference count, so the parent is shared
+		// Create new state (parent will be set by Game::make_move)
 		GameState {
 			board: new_board,
 			turn: get_other_color(self.turn),
@@ -518,11 +536,12 @@ impl GameState {
 		let mut new_zobrist_hash = self.zobrist_hash.clone();
 		new_zobrist_hash.update_move(self, &mv);
 		new_zobrist_hash.update_turn();
-		new_zobrist_hash.update_castle_rights( // Update only if these have changed
-			new_state.white_castle_left == self.white_castle_left,
-			new_state.white_castle_right == self.white_castle_right,
-			new_state.black_castle_left == self.black_castle_left,
-			new_state.black_castle_right == self.black_castle_right,
+		// XOR out castle rights that were lost (can only go true -> false)
+		new_zobrist_hash.update_castle_rights(
+			self.white_castle_left && !new_state.white_castle_left,
+			self.white_castle_right && !new_state.white_castle_right,
+			self.black_castle_left && !new_state.black_castle_left,
+			self.black_castle_right && !new_state.black_castle_right,
 		);
 		new_state.zobrist_hash = new_zobrist_hash;
 
@@ -538,10 +557,9 @@ impl GameState {
 	}
 }
 
-// Game is just a reference to a GameState, enabling branching
-#[derive(Clone)]
+// Game owns a GameState in a simple linked list (no branching)
 pub struct Game {
-	pub state: Rc<GameState>,
+	pub state: Box<GameState>,
 }
 
 // Implement Deref so we can access GameState fields directly (e.g., game.board instead of game.state.board)
@@ -593,7 +611,7 @@ impl fmt::Debug for Game {
 
 impl Game {
 	pub fn from(game_state: GameState) -> Game {
-		Game { state: Rc::new(game_state) }
+		Game { state: Box::new(game_state) }
 	}
 
     pub fn new() -> Game {
@@ -669,35 +687,35 @@ impl Game {
 				move_count: 0,
 		};
 		game_state.zobrist_hash = ZobristHash::from(&game_state);
-		Game { state: Rc::new(game_state) }
+		Game { state: Box::new(game_state) }
 	}
 
 	// Reverses most recently made move
 	pub fn reverse(&mut self) -> () {
-		// Access the parent GameState through Rc without moving
-		if let Some(parent_state) = &self.parent {
-			// Clone the Rc to point to the same parent state (shared reference)
-			self.state = Rc::clone(parent_state);
+		// Move ownership back from parent to state
+		if let Some(parent_state) = self.state.parent.take() {
+			self.state = parent_state;
 		}
 	}
 
 	#[inline(never)]
 	pub fn make_move_no_derived(&mut self, mv: Move) -> () {
 		let mut new_state = self.state.generate_new_state_no_derived(&mv);
-		new_state.parent = Some(Rc::clone(&self.state));
-
-		self.state = Rc::new(new_state);
+		// Move current state into parent
+		let old_state = std::mem::replace(&mut self.state, Box::new(new_state));
+		self.state.parent = Some(old_state);
 	}
 
 	#[inline(never)]
 	pub fn make_move(&mut self, mv: Move) -> () {
 		// Create a new GameState with the move applied
-		// The parent is the current state (shared via Rc for branching)
+		// Move current state into parent (simple linked list, no branching)
 		let mut new_state = self.state.generate_new_state(&mv);
-		new_state.parent = Some(Rc::clone(&self.state));
 		new_state.checkmate = self.get_is_checkmate(&new_state);
-
-		self.state = Rc::new(new_state);
+		
+		// Move current state into parent
+		let old_state = std::mem::replace(&mut self.state, Box::new(new_state));
+		self.state.parent = Some(old_state);
 	}
 
 	// Evaluates if the current position is checkmate via the following criteria:
@@ -1176,14 +1194,16 @@ pub fn get_all_valid_moves_fast(game: &GameState, color_override: Option<Color>)
 					match piece.color {
 						Color::White => {
 							if game.white_castle_left {
-								if [(7,1), (7,2), (7,3)]
+								let paired_piece = game.board[7][0];
+								if paired_piece.role == Role::Rook && paired_piece.color == Color::White && [(7,1), (7,2), (7,3)]
 									.into_iter()
 									.all(|(x, y)| game.board[x][y].color == Color::Blank) {
 										moves.push(Move(Square(7, 4), Square(7, 2)));
 									}
 							}
 							if game.white_castle_right {
-								if [(7,6), (7,5)]
+								let paired_piece = game.board[7][7];
+								if paired_piece.role == Role::Rook && paired_piece.color == Color::White && [(7,6), (7,5)]
 									.into_iter()
 									.all(|(x, y)| game.board[x][y].color == Color::Blank) {
 										moves.push(Move(Square(7, 4), Square(7, 6)));
@@ -1192,14 +1212,16 @@ pub fn get_all_valid_moves_fast(game: &GameState, color_override: Option<Color>)
 						}
 						Color::Black => {
 							if game.black_castle_left {
-								if [(0,1), (0,2), (0,3)]
+								let paired_piece = game.board[0][0];
+								if paired_piece.role == Role::Rook && paired_piece.color == Color::Black && [(0,1), (0,2), (0,3)]
 									.into_iter()
 									.all(|(x, y)| game.board[x][y].color == Color::Blank) {
 										moves.push(Move(Square(0, 4), Square(0, 2)));
 									}
 							}
 							if game.black_castle_right {
-								if [(0,6), (0,5)]
+								let paired_piece = game.board[0][7];
+								if paired_piece.role == Role::Rook && paired_piece.color == Color::Black && [(0,6), (0,5)]
 									.into_iter()
 									.all(|(x, y)| game.board[x][y].color == Color::Blank) {
 										moves.push(Move(Square(0, 4), Square(0, 6)));
