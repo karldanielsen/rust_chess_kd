@@ -110,36 +110,6 @@ pub fn get_rook_moves(idx: usize, occupancy: u64) -> u64 {
 	tables.1[idx][table_index]
 }
 
-
-fn compute_bishop_magic_mask(idx: usize) -> u64 {
-    let mut mask = 0u64;
-
-    let row = (idx / 8) as i8;
-    let col = (idx % 8) as i8;
-    let mut idx = 1;
-    while idx < 7 {
-        let mut pair_idx = 0;
-        while pair_idx < 4 {
-            let pair = constants::BISHOP_MOVE_PAIRS[pair_idx];
-            pair_idx += 1;
-            let new_row = row + idx * pair.0;
-            let new_col = col + idx * pair.1;
-            if new_row >= 0 && new_row < 8 && new_col >= 0 && new_col < 8 {
-                // In addition to checking if the new square is on the board,
-                // we also need to check if it is the last square in the direction.
-                if new_row == 7 && pair.0 == 1 || new_row == 0 && pair.0 == -1 ||
-                   new_col == 7 && pair.1 == 1 || new_col == 0 && pair.1 == -1 {
-                    continue;
-                }
-
-                mask |= 1u64 << (new_row as u64 * 8 + new_col as u64);
-            }
-        }
-        idx += 1;
-    }
-    mask
-}
-
 static BISHOP_MAGIC_MASKS: Lazy<([u64; 64], [Vec<u64>; 64])> = Lazy::new(|| {
 	let mut magic_numbers = [0u64; 64];
 	let mut lookup_tables: [Vec<u64>; 64] = array::from_fn(|_| Vec::new());

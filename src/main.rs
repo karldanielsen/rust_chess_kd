@@ -4,48 +4,10 @@ mod transposition_tables;
 mod constants;
 mod magic_tables;
 
-use std::time::Instant;
 use std::error::Error;
 use std::io;
-use std::array;
 use std::cell::RefCell;
 use rayon::prelude::*;
-
-fn get_user_move() -> Result<game::Move, Box<dyn Error>> {
-	println!("Please enter your move.");
-	let mut input_text = String::new();
-
-    io::stdin()
-        .read_line(&mut input_text)
-        .expect("Failed to read line");
-
-    let trimmed_input = input_text.trim();
-
-	let split_input = trimmed_input.split(',').collect::<Vec<&str>>();
-
-	if split_input.len() != 2 {
-		Err("qooq".into())
-	} else {
-		let chars_1 = split_input[0].chars().collect::<Vec<char>>();
-		let chars_2 = split_input[1].chars().collect::<Vec<char>>();
-		if chars_1.len() != 2 {
-			Err("qooq".into())
-		} else if chars_2.len() != 2 {
-			Err("qooq".into())
-		} else {
-			Ok(game::Move(
-				game::Square(
-					chars_1[0].to_digit(10).unwrap() as usize,
-					chars_1[1].to_digit(10).unwrap() as usize,
-				),
-				game::Square(
-					chars_2[0].to_digit(10).unwrap() as usize,
-					chars_2[1].to_digit(10).unwrap() as usize,
-				),
-			))
-		}
-	}
-}
 
 fn adjust_bot(bot: bot::Bot, step_pct: f32) -> bot::Bot {
 	let mut new_bot = bot.clone();
@@ -155,8 +117,6 @@ fn play_game_loop(game: &mut game::Game, bot1: &bot::Bot, bot2: &bot::Bot, eval_
 	}
 }
 
-fn run_training(max_depth: u32) -> () {
-	let mut game = game::Game::new();
 
 	let mut bots: Vec<(bot::Bot, i32)> = Vec::new();
     let mobility_weight = 0.194;

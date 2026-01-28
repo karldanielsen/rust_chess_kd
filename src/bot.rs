@@ -1,13 +1,8 @@
 use crate::game;
-use crate::transposition_tables::{TranspositionTable, EntryType};
-use crate::constants;
+use crate::transposition_tables::TranspositionTable;
 use std::cmp::Ordering;
 use std::fmt;
-use once_cell::unsync::OnceCell;
-use std::time::Duration;
 use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
-use std::sync::{Arc, mpsc};
-use std::thread;
 
 #[cfg(target_arch = "wasm32")]
 use web_sys::window;
@@ -32,9 +27,6 @@ fn get_time_now() -> f64 {
 pub static mut PRUNE_COUNTS: [(usize, usize); 30] = [(0, 0); 30];
 // // TP table hit rate: (hits, total)
 pub static mut TP_TABLE_HIT_RATE: (usize, usize) = (0, 0);
-// // Debug: track set/get operations
-pub static mut TP_TABLE_SETS: usize = 0;
-pub static mut TP_TABLE_GETS: usize = 0;
 
 pub enum AsyncEvaluation {
 	Eval(game::Move, f32),
@@ -85,7 +77,6 @@ impl fmt::Display for Bot {
 	}
 }
 
-pub const DEFAULT_MOBILITY_WEIGHT: f32 = 0.05;
 pub const CENTER_CONTROL_MASK: u64 = 0b00000000_00000000_00000000_11111111_11111111_00000000_00000000_00000000;
 pub const CENTER_CONTROL_WEIGHT: f32 = 0.4;
 
@@ -99,27 +90,6 @@ const ROW_MASKS: [u64; 6] = [
 	0b11111111u64 << 48,   // Row 6 (x=6)
 ];
 
-// Bonus for castling specifically-- since king mobility is _good_ but castling is _better_
-pub const DEFAULT_CASTLE_BONUS: f32 = 10.0;
-
-// Bonus for maintaining the ability to castle
-pub const DEFAULT_CAN_CASTLE_BONUS: f32 = 1.0;
-
-// Piece weights array indexed by Role enum: [Queen, King, Rook, Bishop, Knight, Pawn]
-pub const DEFAULT_PIECE_WEIGHTS: [f32; 6] = [8.0, 15.0, 5.0, 3.1, 2.9, 1.0];
-
-// Attack weights array: attack_weights[attacking_piece][attacked_piece]
-// Piece types: [Queen=0, King=1, Rook=2, Bishop=3, Knight=4, Pawn=5]
-pub const DEFAULT_ATTACK_WEIGHTS: [[f32; 6]; 6] = [
-	[4.0, 4.0, 2.5, 1.5, 1.5, 0.5], // Queen attacking
-	[4.0, 4.0, 2.5, 1.5, 1.5, 0.5], // King attacking
-	[2.5, 2.5, 2.0, 1.2, 1.2, 0.4], // Rook attacking
-	[1.5, 1.5, 1.2, 1.0, 1.0, 0.3], // Bishop attacking
-	[1.5, 1.5, 1.2, 1.0, 1.0, 0.3], // Knight attacking
-	[0.5, 0.5, 0.4, 0.3, 0.3, 0.1], // Pawn attacking
-];
-pub const DEFAULT_PAWN_ADVANCE_WEIGHTS: [f32; 6] = [0.0, 0.0, 0.0, 0.1, 0.3, 0.5];
-
 // TODO:
 // - Iterative Deepening
 // - Aggregate a list of "acceptable" moves the calling fn can pick from
@@ -129,7 +99,7 @@ pub const DEFAULT_PAWN_ADVANCE_WEIGHTS: [f32; 6] = [0.0, 0.0, 0.0, 0.1, 0.3, 0.5
 // - Most likely we just need boring old game state simplification and move calculation optimization.
 //   - Make game state static, and store a history of reversible moves (move + check states + maybe piece taken)
 
-const TRANSPOSITION_TABLE_DEPTH: u32 = 4;
+const TRANSPOSITION_TABLE_DEPTH: u32 = 3;
 impl Bot {
 
 	// Synchronous version for WebAssembly - runs for approximately time_limit_seconds
@@ -191,17 +161,14 @@ impl Bot {
 
 	pub fn minimax_eval(&self, game: &mut game::Game, depth: u32, mut floor: f32, mut ceil: f32, transposition_table: &mut TranspositionTable, max_depth: u32, cancel_flag: Option<&AtomicBool>) -> AsyncEvaluation {
 		if depth >= TRANSPOSITION_TABLE_DEPTH {
-			if let Some((score, entry_type, stored_depth, best_move)) = transposition_table.get_depth(game, depth as usize) {
+			if let Some((score, entry_type, _, best_move)) = transposition_table.get_depth(game, depth as usize) {
 				match entry_type {
-					EntryType::Exact => return AsyncEvaluation::Eval(best_move, score),
-					EntryType::Lowerbound => floor = score,
-					EntryType::Upperbound => ceil = score,
+					crate::transposition_tables::EntryType::Exact => return AsyncEvaluation::Eval(best_move, score),
+					crate::transposition_tables::EntryType::Lowerbound => floor = score,
+					crate::transposition_tables::EntryType::Upperbound => ceil = score,
 				}
 			}
 		}
-
-		let original_floor = floor;
-		let original_ceil = ceil;
 		
 		// Get move count without holding a reference
 		let move_count = {
@@ -244,7 +211,6 @@ impl Bot {
 
 				unsafe { 
 					TP_TABLE_HIT_RATE.1 += 1;
-					TP_TABLE_GETS += 1;
 				}
 
 				// Check for position at depth-1 (the depth we'll evaluate this position at)
@@ -285,16 +251,15 @@ impl Bot {
 				}
 			});
 
-			moves_with_scores.into_iter().map(|(idx, _, capture_score)| idx).collect()
+			moves_with_scores.into_iter().map(|(idx, _, _)| idx).collect()
 		} else {
 			(0..move_count).collect()
 		};
 
-		let mut tp_table_entry_type = EntryType::Exact;
+		let mut tp_table_entry_type = crate::transposition_tables::EntryType::Exact;
 		let mut best_move = game::Move(game::Square(0,0), game::Square(0,0));
 		let mut best_score = if game.get_turn() == game::Color::White { f32::MIN } else { f32::MAX };
 		let mut moves_checked = 0; // Track actual moves checked (accounting for continue statements)
-		let mut pruned = false; // Track if we pruned
 
 		// TODO: Can I just rip rayon here? GameState is thread safe,
 		// we'd have to clone the "Game -> GameState" Rc, but I think
@@ -403,8 +368,7 @@ impl Bot {
 				// Beta cutoff: if alpha >= beta, opponent won't allow this branch
 				if floor >= ceil {
 					// There could be a better move, but in finding a refutation we at least set a lowerbound.
-					tp_table_entry_type = EntryType::Lowerbound;
-					pruned = true;
+					tp_table_entry_type = crate::transposition_tables::EntryType::Lowerbound;
 					break; // Prune remaining moves
 				}
 			} else {
@@ -418,8 +382,7 @@ impl Bot {
 				// Alpha cutoff: if beta <= alpha, opponent won't allow this branch
 				if ceil <= floor {
 					// There could be a worse move, but in finding a refutation we at least set an upperbound.
-					tp_table_entry_type = EntryType::Upperbound;
-					pruned = true;
+					tp_table_entry_type = crate::transposition_tables::EntryType::Upperbound;
 					break; // Prune remaining moves
 				}
 			}
@@ -439,7 +402,6 @@ impl Bot {
 
 		// Store position at current depth (before making moves) for transposition table lookup
 		if depth >= TRANSPOSITION_TABLE_DEPTH {
-			unsafe { TP_TABLE_SETS += 1; }
 			transposition_table.set(game, best_score, depth as usize, tp_table_entry_type, best_move);
 		}
 

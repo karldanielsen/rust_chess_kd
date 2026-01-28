@@ -1,6 +1,5 @@
 use crate::game;
 use crate::constants::TRANSPOSITION_TABLE_SIZE;
-use std::rc::Rc;
 
 #[derive(Clone, Copy)]
 pub enum EntryType {
@@ -29,36 +28,12 @@ impl TranspositionTable {
         TranspositionTable { table }
 	}
 
-	pub fn get(&self, game: &game::Game) -> Option<f32> {
-		let hash = game.state.zobrist_hash.hash;
-		let index = (hash % TRANSPOSITION_TABLE_SIZE as u64) as usize;
-		if let Some(entry) = &self.table[index] {
-			if entry.hash == hash {
-				return Some(entry.score);
-			}
-			println!("Hash collision!");
-			return None;
-		}
-		None
-	}
-
 	pub fn get_depth(&self, game: &game::Game, depth: usize) -> Option<(f32, EntryType, usize, game::Move)> {
 		let hash = game.state.zobrist_hash.hash;
 		let index = (hash % TRANSPOSITION_TABLE_SIZE as u64) as usize;
 		if let Some(entry) = &self.table[index] {
 			if entry.hash == hash && entry.depth >= depth {
 				return Some((entry.score, entry.entry_type, entry.depth, entry.best_move));
-			}
-		}
-		return None;
-	}
-
-	pub fn get_exact_depth(&self, game: &game::Game, depth: usize) -> Option<f32> {
-		let hash = game.state.zobrist_hash.hash;
-		let index = (hash % TRANSPOSITION_TABLE_SIZE as u64) as usize;
-		if let Some(entry) = &self.table[index] {
-			if entry.hash == hash && entry.depth == depth {
-				return Some(entry.score);
 			}
 		}
 		return None;

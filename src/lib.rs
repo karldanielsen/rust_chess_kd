@@ -171,8 +171,6 @@ pub fn make_bot_move(depth_callback: Option<js_sys::Function>) -> String {
                 bot.evaluate_position_with_time_limit_sync(game, transposition_table, 1, Some(&mut callback_closure))
             }
             None => {
-                // No callback - use a dummy closure type to help type inference
-                let mut dummy_closure = |_depth: u32| {};
                 bot.evaluate_position_with_time_limit_sync::<fn(u32)>(game, transposition_table, 1, None)
             }
         };
@@ -184,8 +182,7 @@ pub fn make_bot_move(depth_callback: Option<js_sys::Function>) -> String {
         }
         
         if !game.get_is_valid_move(bot_move) {
-            let valid_moves = game.get_all_valid_moves();
-            panic!("Bot returned invalid move: {:?}. Score: {}. Valid moves available: {}", bot_move, score, valid_moves.len());
+            panic!("Bot returned invalid move: {:?}. Score: {}.", bot_move, score);
         }
         
         game.make_move(bot_move);
