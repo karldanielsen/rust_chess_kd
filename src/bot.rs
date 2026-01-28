@@ -308,6 +308,41 @@ impl Bot {
 				let moves_ref = game.get_move_list();
 				moves_ref[idx]
 			};
+			// Check if castling move is illegal (king or intermediate squares are attacked)
+			if game::Move::is_castle(&mv) {
+				let opponent_mobility = match game.turn {
+					game::Color::White => game.bitboards.black_mobility,
+					game::Color::Black => game.bitboards.white_mobility,
+					game::Color::Blank => 0,
+				};
+				
+				// Create bitboard mask for squares involved in castling
+				let castle_squares_mask = match mv {
+					// White kingside: e1(7,4) -> g1(7,6), check e1, f1(7,5), g1
+					game::Move(game::Square(7, 4), game::Square(7, 6)) => {
+						(1u64 << (7 * 8 + 4)) | (1u64 << (7 * 8 + 5)) | (1u64 << (7 * 8 + 6))
+					}
+					// White queenside: e1(7,4) -> c1(7,2), check e1, d1(7,3), c1
+					game::Move(game::Square(7, 4), game::Square(7, 2)) => {
+						(1u64 << (7 * 8 + 4)) | (1u64 << (7 * 8 + 3)) | (1u64 << (7 * 8 + 2))
+					}
+					// Black kingside: e8(0,4) -> g8(0,6), check e8, f8(0,5), g8
+					game::Move(game::Square(0, 4), game::Square(0, 6)) => {
+						(1u64 << (0 * 8 + 4)) | (1u64 << (0 * 8 + 5)) | (1u64 << (0 * 8 + 6))
+					}
+					// Black queenside: e8(0,4) -> c8(0,2), check e8, d8(0,3), c8
+					game::Move(game::Square(0, 4), game::Square(0, 2)) => {
+						(1u64 << (0 * 8 + 4)) | (1u64 << (0 * 8 + 3)) | (1u64 << (0 * 8 + 2))
+					}
+					_ => 0, // Should never happen if is_castle returned true
+				};
+				
+				// If any castle squares are attacked, skip this move
+				if opponent_mobility & castle_squares_mask > 0 {
+					continue;
+				}
+			}
+			
 			game.make_move(mv);
 			match game::get_other_color(game.turn) {
 				game::Color::White => if game.white_check {
