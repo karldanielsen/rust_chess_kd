@@ -4,14 +4,32 @@ use crate::constants;
 use std::cmp::Ordering;
 use std::fmt;
 use once_cell::unsync::OnceCell;
-use std::time::Instant;
 use std::time::Duration;
 use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 use std::sync::{Arc, mpsc};
 use std::thread;
 
+#[cfg(target_arch = "wasm32")]
+use web_sys::window;
+
+#[cfg(target_arch = "wasm32")]
+fn get_time_now() -> f64 {
+    window()
+        .and_then(|w| w.performance())
+        .map(|p| p.now())
+        .unwrap_or(0.0)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+use std::time::Instant;
+
+#[cfg(not(target_arch = "wasm32"))]
+fn get_time_now() -> f64 {
+    Instant::now().elapsed().as_secs_f64() * 1000.0 // Convert to milliseconds to match performance.now()
+}
+
 // Index is depth, left is total prunable moves (move_count - 1), right is # of moves actually checked before pruning
-pub static mut PRUNE_COUNTS: [(usize, usize); 8] = [(0, 0); 8];
+pub static mut PRUNE_COUNTS: [(usize, usize); 30] = [(0, 0); 30];
 // // TP table hit rate: (hits, total)
 pub static mut TP_TABLE_HIT_RATE: (usize, usize) = (0, 0);
 // // Debug: track set/get operations
@@ -113,115 +131,62 @@ pub const DEFAULT_PAWN_ADVANCE_WEIGHTS: [f32; 6] = [0.0, 0.0, 0.0, 0.1, 0.3, 0.5
 
 const TRANSPOSITION_TABLE_DEPTH: u32 = 4;
 impl Bot {
-	pub fn evaluate_position_with_time_limit(&self, game: &mut game::Game, transposition_table: &mut TranspositionTable, time_limit_seconds: u64) -> (game::Move, f32) {
-		let time_limit = Duration::from_secs(time_limit_seconds);
-		// Create cancel flag (small Arc, only for the flag, not the heavy data structures)
-		let cancel_flag = Arc::new(AtomicBool::new(false));
-		let cancel_flag_clone = cancel_flag.clone();
+
+	// Synchronous version for WebAssembly - runs for approximately time_limit_seconds
+	// Optionally calls a callback after each depth with the current depth
+	pub fn evaluate_position_with_time_limit_sync<F>(&self, game: &mut game::Game, transposition_table: &mut TranspositionTable, time_limit_seconds: u64, mut depth_callback: Option<&mut F>) -> (game::Move, f32, u32) 
+	where
+		F: FnMut(u32),
+	{
+		let time_limit_ms = time_limit_seconds * 1000;
+		let start_time_ms = get_time_now();
+		let cancel_flag = AtomicBool::new(false);
 		
-		// Channel to receive results from the thread
-		let (tx_result, rx_result) = mpsc::channel();
-		
-		// Move everything into the thread
-		let bot = self.clone();
-		let mut game_thread = std::mem::replace(game, game::Game::new());
-		let mut tp_table_thread = std::mem::replace(transposition_table, TranspositionTable::new());
-		
-		// Spawn the search thread
-		let handle = thread::spawn(move || {
-			let mut best_move = game::Move(game::Square(0,0), game::Square(0,0));
-			let mut best_score = f32::MIN;
-			let mut depth = 4;
-			
-			loop {
-				// Check cancel flag before starting each depth
-				if cancel_flag_clone.load(AtomicOrdering::Relaxed) {
-					break;
-				}
-				
-				// Evaluate at this depth
-				match bot.minimax_eval(&mut game_thread, depth, f32::MIN, f32::MAX, &mut tp_table_thread, depth, Some(&*cancel_flag_clone)) {
-					AsyncEvaluation::Eval(mv, score) => {
-						best_move = mv;
-						best_score = score;
-						
-						// Send intermediate result
-						let _ = tx_result.send((depth, best_move, best_score));
-					}
-					AsyncEvaluation::Cancel => {
-						// Cancelled during evaluation
-						break;
-					}
-				}
-				
-				depth += 1;
+		let mut best_move = game::Move(game::Square(0,0), game::Square(0,0));
+		let mut best_score = f32::MIN;
+		let mut depth = 1;
+		let mut max_depth_reached = 0;
+
+		// Iterative deepening with time limit
+		loop {
+			// Check if time limit exceeded before starting next depth
+			let elapsed_ms = get_time_now() - start_time_ms;
+			if elapsed_ms >= time_limit_ms as f64 {
+				cancel_flag.store(true, AtomicOrdering::Relaxed);
+				break;
 			}
-			
-			// Return the game and transposition table
-			(game_thread, tp_table_thread)
-		});
-		
-		// Monitor time and set cancel flag when time expires
-		let start_time = Instant::now();
-		let mut last_result = (0, game::Move(game::Square(0,0), game::Square(0,0)), f32::MIN);
-		
-		// Poll for results until time expires
-		while start_time.elapsed() < time_limit {
-			match rx_result.recv_timeout(Duration::from_millis(10)) {
-				Ok(result) => {
-					last_result = result;
-				}
-				Err(_) => {
-					// Timeout - check if we've exceeded time limit
-					if start_time.elapsed() >= time_limit {
+
+			match self.minimax_eval(game, depth, f32::MIN, f32::MAX, transposition_table, self.max_depth, Some(&cancel_flag)) {
+				AsyncEvaluation::Eval(mv, score) => {
+					best_move = mv;
+					best_score = score;
+					max_depth_reached = depth;
+					
+					// Call callback to update UI with current depth
+					if let Some(ref mut cb) = depth_callback {
+						cb(depth);
+					}
+					
+					// Check time after getting a result
+					let elapsed_ms = get_time_now() - start_time_ms;
+					if elapsed_ms >= time_limit_ms as f64 {
 						cancel_flag.store(true, AtomicOrdering::Relaxed);
 						break;
 					}
 				}
-			}
-		}
-		
-		// Ensure cancel flag is set
-		cancel_flag.store(true, AtomicOrdering::Relaxed);
-		
-		// Wait for thread to finish and get back game and transposition table
-		let (game_returned, tp_table_returned) = handle.join().unwrap();
-		*game = game_returned;
-		*transposition_table = tp_table_returned;
-		
-		println!("Depth checked: {}", last_result.0);
-		(last_result.1, last_result.2)
-	}
-
-	pub fn evaluate_position_max_depth(&self, game: &mut game::Game, transposition_table: &mut TranspositionTable) -> (game::Move, f32) {
-		let mut best_move = game::Move(game::Square(0,0), game::Square(0,0));
-		let mut best_score = f32::MIN;
-
-		// Iterative deepening
-		let start_time = Instant::now();
-		for i in 0..=self.max_depth {
-			match self.minimax_eval(game, i, f32::MIN, f32::MAX, transposition_table, self.max_depth, None) {
-				AsyncEvaluation::Eval(mv, score) => {
-					best_move = mv;
-					best_score = score;
-				}
 				AsyncEvaluation::Cancel => {
-					// Should not happen when cancel_flag is None, but handle it anyway
+					// Time limit exceeded during evaluation
 					break;
 				}
 			}
+
+			depth += 1;
+			if depth > self.max_depth {
+				break;
+			}
 		}
-		println!("Time taken: {:?}", start_time.elapsed());
-		println!("Checked move counts:");
-		for i in 0..8 {
-			println!("Depth {}: {} / {} = {:.2}%", i, unsafe { PRUNE_COUNTS[i].1 }, unsafe { PRUNE_COUNTS[i].0 }, unsafe { PRUNE_COUNTS[i].1 as f32 / PRUNE_COUNTS[i].0 as f32 * 100.0 });
-			unsafe { PRUNE_COUNTS[i] = (0, 0); }
-		}
-		println!("TP table hit rate: {} / {} = {:.2}%", unsafe { TP_TABLE_HIT_RATE.0 }, unsafe { TP_TABLE_HIT_RATE.1 }, unsafe { TP_TABLE_HIT_RATE.0 as f32 / TP_TABLE_HIT_RATE.1 as f32 * 100.0 });
-		unsafe { TP_TABLE_HIT_RATE = (0, 0); }
-		println!("TP table sets: {}, gets: {}", unsafe { TP_TABLE_SETS }, unsafe { TP_TABLE_GETS });
-		unsafe { TP_TABLE_SETS = 0; TP_TABLE_GETS = 0; }
-		(best_move, best_score)
+
+		(best_move, best_score, max_depth_reached)
 	}
 
 	pub fn minimax_eval(&self, game: &mut game::Game, depth: u32, mut floor: f32, mut ceil: f32, transposition_table: &mut TranspositionTable, max_depth: u32, cancel_flag: Option<&AtomicBool>) -> AsyncEvaluation {

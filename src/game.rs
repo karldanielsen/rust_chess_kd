@@ -1,6 +1,5 @@
 use std::fmt;
 use std::ops::Deref;
-use rand::Rng;
 use colored::Colorize;
 use once_cell::sync::Lazy;
 use once_cell::unsync::OnceCell;
@@ -11,10 +10,9 @@ use crate::constants::{TRANSPOSITION_TABLE_SIZE, ALL_KNIGHT_MASKS, ALL_KING_MASK
 
 fn generate_zobrist_number() -> u64 {
 	const MAX_ATTEMPTS: usize = 1000;
-	let mut rng = rand::rng();
 	
 	for _attempt in 0..MAX_ATTEMPTS {
-		let num = rng.random_range(0..u64::MAX as u64);
+		let num = fastrand::u64(0..u64::MAX);
 		
 		// Validate single number properties
 		if num == 0 {

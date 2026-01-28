@@ -1,6 +1,5 @@
 use once_cell::sync::Lazy;
 use crate::constants;
-use rand::Rng;
 use std::array;
 
 static ROOK_MAGIC_MASKS: Lazy<([u64; 64], [Vec<u64>; 64])> = Lazy::new(|| {
@@ -68,10 +67,9 @@ static ROOK_MAGIC_MASKS: Lazy<([u64; 64], [Vec<u64>; 64])> = Lazy::new(|| {
         }
 
 		loop {
-			let mut rng = rand::rng();
-			let magic_number_1: u64 = rng.random();
-			let magic_number_2: u64 = rng.random();
-			let magic_number_3: u64 = rng.random();
+			let magic_number_1: u64 = fastrand::u64(..);
+			let magic_number_2: u64 = fastrand::u64(..);
+			let magic_number_3: u64 = fastrand::u64(..);
 			let magic_number: u64 = magic_number_1 & magic_number_2 & magic_number_3;
 			let hash_bits = (magic_number.wrapping_mul(mask_clone)) >> (64 - 12);
 			if hash_bits.count_ones() < 6 {
@@ -207,10 +205,9 @@ static BISHOP_MAGIC_MASKS: Lazy<([u64; 64], [Vec<u64>; 64])> = Lazy::new(|| {
         }
 
 		loop {
-			let mut rng = rand::rng();
-			let magic_number_1: u64 = rng.random();
-			let magic_number_2: u64 = rng.random();
-			let magic_number_3: u64 = rng.random();
+			let magic_number_1: u64 = fastrand::u64(..);
+			let magic_number_2: u64 = fastrand::u64(..);
+			let magic_number_3: u64 = fastrand::u64(..);
 			let magic_number: u64 = magic_number_1 & magic_number_2 & magic_number_3;
 			let hash_bits = (magic_number.wrapping_mul(mask_clone)) >> (64 - 9);
 			if hash_bits.count_ones() < 6 {
