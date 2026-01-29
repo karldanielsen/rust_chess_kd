@@ -1,0 +1,15 @@
+{
+  "name": "rust_chess",
+  "type": "module",
+  "version": "0.1.0",
+  "files": [
+    "rust_chess_bg.wasm",
+    "rust_chess.js",
+    "rust_chess.d.ts"
+  ],
+  "main": "rust_chess.js",
+  "types": "rust_chess.d.ts",
+  "sideEffects": [
+    "./snippets/*"
+  ]
+}

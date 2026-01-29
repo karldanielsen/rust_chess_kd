@@ -55,8 +55,4 @@ impl TranspositionTable {
 			best_move,
 		});
 	}
-
-	pub fn clear(&mut self) {
-		self.table.fill(None);
-	}
 }
