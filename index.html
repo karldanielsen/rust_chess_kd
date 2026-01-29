@@ -19,14 +19,18 @@
             justify-content: center;
             min-height: 100vh;
             background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            padding: 20px;
+            padding: clamp(10px, 3vw, 20px);
+            margin: 0;
         }
 
         .container {
             background: white;
             border-radius: 12px;
-            padding: 30px;
+            padding: clamp(15px, 4vw, 30px);
             box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+            width: 100%;
+            max-width: 600px;
+            box-sizing: border-box;
         }
 
         h1 {
@@ -37,20 +41,23 @@
 
         #chess-board {
             display: grid;
-            grid-template-columns: repeat(8, 60px);
-            grid-template-rows: repeat(8, 60px);
+            grid-template-columns: repeat(8, 1fr);
+            grid-template-rows: repeat(8, 1fr);
             border: 3px solid #333;
             margin: 20px auto;
             box-shadow: 0 4px 8px rgba(0, 0, 0, 0.2);
+            aspect-ratio: 1;
+            width: 100%;
+            max-width: 480px;
         }
 
         .square {
-            width: 60px;
-            height: 60px;
+            width: 100%;
+            height: 100%;
             display: flex;
             align-items: center;
             justify-content: center;
-            font-size: 40px;
+            font-size: clamp(20px, 5vw, 40px);
             cursor: pointer;
             position: relative;
             user-select: none;
@@ -77,8 +84,8 @@
         .square.valid-move::after {
             content: '';
             position: absolute;
-            width: 20px;
-            height: 20px;
+            width: clamp(10px, 2.5vw, 20px);
+            height: clamp(10px, 2.5vw, 20px);
             border-radius: 50%;
             background-color: rgba(0, 255, 0, 0.5);
             pointer-events: none;
@@ -90,8 +97,8 @@
 
         #status {
             text-align: center;
-            margin: 20px 0;
-            font-size: 18px;
+            margin: clamp(10px, 3vw, 20px) 0;
+            font-size: clamp(14px, 4vw, 18px);
             font-weight: 600;
             color: #333;
             min-height: 30px;
@@ -105,8 +112,8 @@
         }
 
         button {
-            padding: 12px 24px;
-            font-size: 16px;
+            padding: clamp(10px, 2.5vw, 12px) clamp(20px, 5vw, 24px);
+            font-size: clamp(14px, 3.5vw, 16px);
             border: none;
             border-radius: 6px;
             cursor: pointer;
@@ -133,7 +140,6 @@
 </head>
 <body>
     <div class="container">
-        <h1>♔ Rust Chess ♔</h1>
         <div id="status">Loading...</div>
         <div id="chess-board"></div>
         <div class="controls">
