@@ -55,4 +55,8 @@ impl TranspositionTable {
 			best_move,
 		});
 	}
+
+	pub fn clear(&mut self) {
+		self.table = vec![None; TRANSPOSITION_TABLE_SIZE];
+	}
 }

@@ -22,7 +22,7 @@ fn init_game() {
         let max_depth = 7;
         let mobility_weight = 0.137;
         let center_control_weight = 0.377;
-        let castle_bonus = 1.556;
+        let castle_bonus = 2.5;
         let can_castle_bonus = 1.157;
         let check_weight = 0.956;
         let piece_weights = [11.53544, 19.668903, 5.37966, 4.159992, 3.9006069, 0.91680914];
@@ -160,18 +160,42 @@ pub fn make_bot_move(depth_callback: Option<js_sys::Function>) -> String {
     // Only make move if it's Black's turn (bot plays Black)
     let mut bot_depth = None;
     if game.state.turn == game::Color::Black && !game.state.checkmate {
-        // Use 1 second for now to prevent freezing - can be increased later
         let (bot_move, score, depth) = match depth_callback {
             Some(ref cb) => {
                 // Create a closure that wraps the JavaScript callback
                 let cb = cb.clone();
                 let mut callback_closure = move |depth: u32| {
-                    let _ = cb.call1(&JsValue::NULL, &JsValue::from(depth));
+                    // Call the JavaScript callback - ensure it's called with the right context
+                    // Use JsValue::NULL as 'this' context
+                    match cb.call1(&JsValue::NULL, &JsValue::from(depth)) {
+                        Ok(_) => {
+                            // Success - callback was invoked
+                        }
+                        Err(e) => {
+                            // Log error to console to help debug
+                            #[cfg(target_arch = "wasm32")]
+                            {
+                                use web_sys::console;
+                                let error_msg = format!("Error calling callback at depth {}: {:?}", depth, e);
+                                console::error_1(&error_msg.into());
+                            }
+                        }
+                    }
                 };
-                bot.evaluate_position_with_time_limit_sync(game, transposition_table, 1, Some(&mut callback_closure))
+                bot.evaluate_position_with_time_limit_sync(
+                    game, 
+                    transposition_table, 
+                    3, 
+                    Some(&mut callback_closure)
+                )
             }
             None => {
-                bot.evaluate_position_with_time_limit_sync::<fn(u32)>(game, transposition_table, 1, None)
+                bot.evaluate_position_with_time_limit_sync::<fn(u32)>(
+                    game, 
+                    transposition_table, 
+                    3, 
+                    None
+                )
             }
         };
         bot_depth = Some(depth);

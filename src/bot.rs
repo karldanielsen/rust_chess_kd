@@ -2,7 +2,6 @@ use crate::game;
 use crate::transposition_tables::TranspositionTable;
 use std::cmp::Ordering;
 use std::fmt;
-use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 
 #[cfg(target_arch = "wasm32")]
 use web_sys::window;
@@ -20,7 +19,9 @@ use std::time::Instant;
 
 #[cfg(not(target_arch = "wasm32"))]
 fn get_time_now() -> f64 {
-    Instant::now().elapsed().as_secs_f64() * 1000.0 // Convert to milliseconds to match performance.now()
+    // This function is only used for WASM compatibility
+    // For non-WASM, use Instant directly in functions
+    Instant::now().elapsed().as_secs_f64() * 1000.0
 }
 
 // Index is depth, left is total prunable moves (move_count - 1), right is # of moves actually checked before pruning
@@ -108,25 +109,47 @@ impl Bot {
 	where
 		F: FnMut(u32),
 	{
-		let time_limit_ms = time_limit_seconds * 1000;
+		let time_limit_ms = time_limit_seconds as f64 * 1000.0;
+		
+		#[cfg(target_arch = "wasm32")]
 		let start_time_ms = get_time_now();
-		let cancel_flag = AtomicBool::new(false);
+		
+		#[cfg(not(target_arch = "wasm32"))]
+		let start_time = Instant::now();
 		
 		let mut best_move = game::Move(game::Square(0,0), game::Square(0,0));
 		let mut best_score = f32::MIN;
 		let mut depth = 1;
 		let mut max_depth_reached = 0;
 
+		// Call callback at depth 0 to indicate thinking has started
+		if let Some(ref mut cb) = depth_callback {
+			cb(0);
+		}
+
 		// Iterative deepening with time limit
 		loop {
 			// Check if time limit exceeded before starting next depth
+			#[cfg(target_arch = "wasm32")]
 			let elapsed_ms = get_time_now() - start_time_ms;
-			if elapsed_ms >= time_limit_ms as f64 {
-				cancel_flag.store(true, AtomicOrdering::Relaxed);
+			
+			#[cfg(not(target_arch = "wasm32"))]
+			let elapsed_ms = start_time.elapsed().as_secs_f64() * 1000.0;
+			
+			if elapsed_ms >= time_limit_ms {
 				break;
 			}
 
-			match self.minimax_eval(game, depth, f32::MIN, f32::MAX, transposition_table, self.max_depth, Some(&cancel_flag)) {
+			#[cfg(target_arch = "wasm32")]
+			let time_to_fail_at = Some(start_time_ms + time_limit_ms);
+			#[cfg(not(target_arch = "wasm32"))]
+			let time_to_fail_at = Some(start_time + std::time::Duration::from_millis(time_limit_ms as u64));
+			
+			match self.minimax_eval(game, depth, f32::MIN, f32::MAX, transposition_table, depth, 2,
+				#[cfg(target_arch = "wasm32")]
+				time_to_fail_at,
+				#[cfg(not(target_arch = "wasm32"))]
+				time_to_fail_at) {
 				AsyncEvaluation::Eval(mv, score) => {
 					best_move = mv;
 					best_score = score;
@@ -138,9 +161,13 @@ impl Bot {
 					}
 					
 					// Check time after getting a result
+					#[cfg(target_arch = "wasm32")]
 					let elapsed_ms = get_time_now() - start_time_ms;
-					if elapsed_ms >= time_limit_ms as f64 {
-						cancel_flag.store(true, AtomicOrdering::Relaxed);
+					
+					#[cfg(not(target_arch = "wasm32"))]
+					let elapsed_ms = start_time.elapsed().as_secs_f64() * 1000.0;
+					
+					if elapsed_ms >= time_limit_ms {
 						break;
 					}
 				}
@@ -159,8 +186,26 @@ impl Bot {
 		(best_move, best_score, max_depth_reached)
 	}
 
-	pub fn minimax_eval(&self, game: &mut game::Game, depth: u32, mut floor: f32, mut ceil: f32, transposition_table: &mut TranspositionTable, max_depth: u32, cancel_flag: Option<&AtomicBool>) -> AsyncEvaluation {
+	pub fn minimax_eval(&self, game: &mut game::Game, depth: u32, mut floor: f32, mut ceil: f32, transposition_table: &mut TranspositionTable, max_depth: u32, quiescense_depth: u32, 
+		#[cfg(target_arch = "wasm32")]
+		time_to_fail_at: Option<f64>,
+		#[cfg(not(target_arch = "wasm32"))]
+		time_to_fail_at: Option<Instant>
+	) -> AsyncEvaluation {
 		if depth >= TRANSPOSITION_TABLE_DEPTH {
+			#[cfg(target_arch = "wasm32")]
+			if let Some(time_to_fail_at) = time_to_fail_at {
+				if get_time_now() >= time_to_fail_at {
+					return AsyncEvaluation::Cancel;
+				}
+			}
+			#[cfg(not(target_arch = "wasm32"))]
+			if let Some(time_to_fail_at) = time_to_fail_at {
+				if Instant::now() >= time_to_fail_at {
+					return AsyncEvaluation::Cancel;
+				}
+			}
+
 			if let Some((score, entry_type, _, best_move)) = transposition_table.get_depth(game, depth as usize) {
 				match entry_type {
 					crate::transposition_tables::EntryType::Exact => return AsyncEvaluation::Eval(best_move, score),
@@ -178,13 +223,6 @@ impl Bot {
 		
 		// For move ordering in higher depths, score each move by getting it individually
 		let move_indices: Vec<usize> = if depth > TRANSPOSITION_TABLE_DEPTH + 1 {
-			// Check cancel flag at the start of higher depth searches
-			if let Some(flag) = cancel_flag {
-				if flag.load(AtomicOrdering::Relaxed) {
-					return AsyncEvaluation::Cancel;
-				}
-			}
-		
 			let is_white_turn = game.get_turn() == game::Color::White;
 			let mut moves_with_scores: Vec<(usize, Option<f32>, f32)> = (0..move_count).map(|idx| {
 				// Get move at this index, use it, then drop reference before mutation
@@ -261,12 +299,6 @@ impl Bot {
 		let mut best_score = if game.get_turn() == game::Color::White { f32::MIN } else { f32::MAX };
 		let mut moves_checked = 0; // Track actual moves checked (accounting for continue statements)
 
-		// TODO: Can I just rip rayon here? GameState is thread safe,
-		// we'd have to clone the "Game -> GameState" Rc, but I think
-		// that's fine :thinking:
-		//
-		// OH transposition tables are shared. We'd need a thread-specific one.
-		// Or a shared one behind a Mutex. Hmmmmm.
 		for idx in move_indices {
 			// Get move at this index, use it, then drop reference before mutation
 			let mv = {
@@ -335,7 +367,11 @@ impl Bot {
 			let score = if self.check_for_repetition(game) {
 				0.0
 			} else if depth == max_depth {
-				match self.minimax_eval(game, depth - 1, floor, ceil, transposition_table, max_depth, cancel_flag) {
+				match self.minimax_eval(game, depth - 1, floor, ceil, transposition_table, max_depth, quiescense_depth,
+					#[cfg(target_arch = "wasm32")]
+					time_to_fail_at,
+					#[cfg(not(target_arch = "wasm32"))]
+					time_to_fail_at) {
 					AsyncEvaluation::Eval(_, s) => s + self.do_castle_bonus(game, &mv),
 					AsyncEvaluation::Cancel => {
 						game.reverse();
@@ -343,15 +379,34 @@ impl Bot {
 					}
 				}
 			} else if depth > 0 {
-				match self.minimax_eval(game, depth - 1, floor, ceil, transposition_table, max_depth, cancel_flag) {
+				match self.minimax_eval(game, depth - 1, floor, ceil, transposition_table, max_depth, quiescense_depth,
+					#[cfg(target_arch = "wasm32")]
+					time_to_fail_at,
+					#[cfg(not(target_arch = "wasm32"))]
+					time_to_fail_at) {
 					AsyncEvaluation::Eval(_, s) => s,
 					AsyncEvaluation::Cancel => {
 						game.reverse();
 						return AsyncEvaluation::Cancel;
 					}
 				}
-			} else { // At max depth, evaluate the position.
-				self.eval(&game.state)			
+			} else {
+				// At max_depth, for the top 3 moves, quiescence search.
+				if idx < 3 && quiescense_depth > 0 {
+					match self.minimax_eval(game, depth, floor, ceil, transposition_table, max_depth, quiescense_depth - 1,
+						#[cfg(target_arch = "wasm32")]
+						time_to_fail_at,
+						#[cfg(not(target_arch = "wasm32"))]
+						time_to_fail_at) {
+						AsyncEvaluation::Eval(_, s) => s,
+						AsyncEvaluation::Cancel => {
+							game.reverse();
+							return AsyncEvaluation::Cancel;
+						}
+					}
+				} else {
+					self.eval(&game.state)
+				}
 			};
 
 			game.reverse(); 

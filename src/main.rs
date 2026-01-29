@@ -71,8 +71,7 @@ fn play_game_loop(game: &mut game::Game, bot1: &bot::Bot, bot2: &bot::Bot, eval_
 		// Note: evaluate_position_with_time_limit_sync removed for WASM - using step-based evaluation instead
 		// For main.rs, we'll need a different approach or keep the old function
 		// For now, use a simple depth-limited evaluation
-		let bot_move = game::Move(game::Square(0,0), game::Square(0,0));
-		let score = 0.0;
+		let (bot_move, score, depth_checked) = bot1.evaluate_position_with_time_limit_sync::<fn(u32)>(game, transposition_table, 1, None);
 		if score < -eval_threshold {
 			// If after the best white move the eval is still below the threshold, assume black wins.
 			if print { println!("White move below threshold\n{:?}", game.state) }
@@ -84,7 +83,7 @@ fn play_game_loop(game: &mut game::Game, bot1: &bot::Bot, bot2: &bot::Bot, eval_
 		}
 
 		game.make_move(bot_move);
-		if print { println!("White move: {:?}, Eval: {}\n{:?}", bot_move, score, game.state) }
+		if print { println!("White move: {:?}, Eval: {}, Depth checked: {}\n{:?}", bot_move, score, depth_checked, game.state) }
 
 		if game.checkmate {
 			if print { println!("Checkmate\n{:?}", game.state) }
@@ -95,8 +94,8 @@ fn play_game_loop(game: &mut game::Game, bot1: &bot::Bot, bot2: &bot::Bot, eval_
 		// Note: evaluate_position_with_time_limit_sync removed for WASM - using step-based evaluation instead
 		// For main.rs, we'll need a different approach or keep the old function
 		// For now, use a simple depth-limited evaluation
-		let bot_move = game::Move(game::Square(0,0), game::Square(0,0));
-		let score = 0.0;
+		let (bot_move, score, depth_checked) = bot2.evaluate_position_with_time_limit_sync::<fn(u32)>(game, transposition_table, 2, None);
+
 		if score > eval_threshold {
 			// If after the best black move the eval is still above the threshold, assume white wins.
 			if print { println!("Black move above threshold\n{:?}", game.state) }
@@ -108,7 +107,7 @@ fn play_game_loop(game: &mut game::Game, bot1: &bot::Bot, bot2: &bot::Bot, eval_
 		}
 
 		game.make_move(bot_move);
-		if print { println!("Black move: {:?}, Eval: {}\n{:?}", bot_move, score, game.state) }
+		if print { println!("Black move: {:?}, Eval: {}, Depth checked: {}\n{:?}", bot_move, score, depth_checked, game.state) }
 
 		if bot2.check_for_repetition(&game) {
 			if print { println!("Repetition\n{:?}", game.state) }
@@ -117,7 +116,7 @@ fn play_game_loop(game: &mut game::Game, bot1: &bot::Bot, bot2: &bot::Bot, eval_
 	}
 }
 
-
+fn run_training(max_depth: u32) {
 	let mut bots: Vec<(bot::Bot, i32)> = Vec::new();
     let mobility_weight = 0.194;
 	let center_control_weight = 0.291;
@@ -225,7 +224,7 @@ fn main() -> () {
 		[0.88452005, 0.88452005, 0.88452005, 0.88452005, 0.88452005, 0.88452005],
 	];
 	let pawn_advance_weights = [0.0, 0.0, 0.0, 0.11348749, 0.22835411, 0.47338364];
-	let mut bot1 = bot::Bot::new(
+	let bot1 = bot::Bot::new(
 		max_depth,
 		mobility_weight, 
 		center_control_weight, 
@@ -252,7 +251,7 @@ fn main() -> () {
 		[1.0614241, 1.0614241, 1.0614241, 1.0614241, 1.0614241, 1.0614241],
 	];
 	let pawn_advance_weights2 = [0.0, 0.0, 0.0, 0.085975364, 0.17299554, 0.52598184];
-	let mut bot2 = bot::Bot::new(
+	let bot2 = bot::Bot::new(
 		max_depth,
 		mobility_weight2, 
 		center_control_weight2, 
@@ -265,5 +264,5 @@ fn main() -> () {
 	);
 
 	let mut game = game::Game::new();
-	play_game_early_termination(&mut game, &mut bot1, &mut bot2, 25.0, false, true);
+	play_game_early_termination(&mut game, &bot1, &bot2, 25.0, false, true);
 }

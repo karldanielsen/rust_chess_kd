@@ -24,6 +24,7 @@ version = "0.3"
 features = [
   "Performance",
   "Window",
+  "console",
 ]
 
 [profile.release]

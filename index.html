@@ -270,7 +270,10 @@
             
             // Create callback to update depth display as bot thinks
             const depthCallback = (depth) => {
-                document.getElementById('status').textContent = `Bot thinking... (depth ${depth})`;
+                const statusEl = document.getElementById('status');
+                if (statusEl) {
+                    statusEl.textContent = `Bot thinking... (depth ${depth})`;
+                }
             };
             
             // Use setTimeout to allow UI to update before blocking
