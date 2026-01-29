@@ -304,7 +304,7 @@
             
             // Add bot depth info if available
             if (state.bot_depth !== undefined) {
-                statusText += ` (Bot searched to depth ${state.bot_depth})`;
+                statusText += ` (Bot searched to depth ${state.bot_depth + 2})`;
             }
             
             status.textContent = statusText;
